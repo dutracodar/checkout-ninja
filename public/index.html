@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Cobrax Checkout</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+  <form id="checkout-form" class="bg-white p-8 rounded shadow-md w-full max-w-md space-y-4" autocomplete="off">
+    <h2 class="text-2xl font-bold text-center">Cobrax Checkout</h2>
+
+    <input id="name" type="text" placeholder="Nome completo" required class="w-full px-4 py-2 border rounded"/>
+    <input id="email" type="email" placeholder="E-mail" required class="w-full px-4 py-2 border rounded"/>
+    <input id="cpf" type="text" inputmode="numeric" placeholder="CPF (somente números)" required class="w-full px-4 py-2 border rounded"/>
+    <input id="phone" type="text" inputmode="numeric" placeholder="Celular (DDD+número)" required class="w-full px-4 py-2 border rounded"/>
+
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Valor (R$)</label>
+      <input id="amount" type="text" value="10,00" placeholder="10,00" required class="w-full px-4 py-2 border rounded"/>
+      <p class="text-xs text-gray-500 mt-1">Use vírgula para centavos (ex.: 25,90).</p>
+    </div>
+
+    <div class="space-y-2">
+      <label class="font-semibold block">Forma de pagamento</label>
+      <div class="flex gap-4">
+        <label class="flex items-center gap-2"><input type="radio" name="pmethod" value="pix" checked/>Pix</label>
+        <label class="flex items-center gap-2"><input type="radio" name="pmethod" value="boleto"/>Boleto</label>
+        <label class="flex items-center gap-2"><input type="radio" name="pmethod" value="card"/>Cartão</label>
+      </div>
+    </div>
+
+    <div id="card-fields" class="space-y-2 hidden">
+      <input id="card_number" type="text" inputmode="numeric" maxlength="19" placeholder="0000 0000 0000 0000" class="w-full px-4 py-2 border rounded"/>
+      <div class="grid grid-cols-3 gap-2">
+        <input id="exp_month" type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="w-full px-4 py-2 border rounded"/>
+        <input id="exp_year" type="text" inputmode="numeric" maxlength="4" placeholder="AAAA" class="w-full px-4 py-2 border rounded"/>
+        <input id="cvv" type="text" inputmode="numeric" maxlength="4" placeholder="CVV" class="w-full px-4 py-2 border rounded"/>
+      </div>
+    </div>
+
+    <button id="pay-btn" type="submit" class="w-full bg-black text-white font-bold py-2 rounded hover:opacity-90">Pagar</button>
+
+    <div id="status" class="text-center text-sm text-gray-700"></div>
+    <div id="extra" class="mt-4 space-y-2 text-sm"></div>
+  </form>
+
+  <script>
+    const form = document.getElementById('checkout-form');
+    const statusEl = document.getElementById('status');
+    const extraEl  = document.getElementById('extra');
+    const cardBox  = document.getElementById('card-fields');
+    const btn      = document.getElementById('pay-btn');
+
+    // --------- helpers UI/UX ----------
+    function parseAmountBRL(v) {
+      return String(v || '').replace(/[^\d,.\s]/g,'').replace(/\s+/g,'').replace(',','.');
+    }
+    async function copy(text) {
+      try { await navigator.clipboard.writeText(text); alert("Copiado!"); }
+      catch { alert("Não foi possível copiar."); }
+    }
+    function renderPix(pix) {
+      let html = '<div class="p-3 border rounded"><div class="font-semibold mb-1">Pix gerado:</div>';
+      if (pix.qr_code_base64) {
+        html += `<img class="mx-auto" alt="QR Pix" src="data:image/png;base64,${pix.qr_code_base64}" />`;
+      }
+      if (pix.qr_code_url) {
+        html += `<div class="mt-2"><a class="text-blue-600 underline" target="_blank" rel="noopener noreferrer" href="${pix.qr_code_url}">Abrir QR Code</a></div>`;
+      }
+      if (pix.qr_code) {
+        const copyStr = JSON.stringify(pix.qr_code);
+        html += `<div class="mt-2 break-all">
+          <strong>Copia & Cola:</strong><br>${pix.qr_code}
+          <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick='copy(${copyStr})'>Copiar</button>
+        </div>`;
+      }
+      html += '</div>';
+      return html;
+    }
+    function renderBoleto(b) {
+      let html = '<div class="p-3 border rounded"><div class="font-semibold mb-1">Boleto gerado</div>';
+      if (b.url) {
+        html += `<div><a class="text-blue-600 underline" target="_blank" rel="noopener noreferrer" href="${b.url}">Abrir boleto (PDF)</a></div>`;
+      }
+      if (b.line) {
+        const copyStr = JSON.stringify(b.line);
+        html += `<div class="mt-2 break-all">
+          <strong>Linha digitável:</strong><br>${b.line}
+          <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick='copy(${copyStr})'>Copiar</button>
+        </div>`;
+      }
+      html += '</div>';
+      return html;
+    }
+    function renderCard(c) {
+      const { status, reason, acquirer_message, code } = c;
+      const det = reason || acquirer_message || code;
+      return `<div class="p-3 border rounded">
+        <strong>Status do cartão:</strong> ${status || 'desconhecido'}
+        ${det ? `<div class="mt-1 text-xs text-gray-600">Detalhe: ${det}</div>` : ''}
+      </div>`;
+    }
+
+    // --------- máscaras leves ----------
+    const cpfEl = document.getElementById('cpf');
+    cpfEl.addEventListener('input', () => {
+      let v = cpfEl.value.replace(/\D/g,'').slice(0,11);
+      v = v.replace(/(\d{3})(\d)/,'$1.$2')
+           .replace(/(\d{3})(\d)/,'$1.$2')
+           .replace(/(\d{3})(\d{1,2})$/,'$1-$2');
+      cpfEl.value = v;
+    });
+
+    const phoneEl = document.getElementById('phone');
+    phoneEl.addEventListener('input', () => {
+      let v = phoneEl.value.replace(/\D/g,'').slice(0,11);
+      if (v.length > 10) v = v.replace(/(\d{2})(\d{5})(\d{4})/, '$1 $2-$3');
+      else v = v.replace(/(\d{2})(\d{4})(\d{0,4})/, '$1 $2-$3');
+      phoneEl.value = v.trim();
+    });
+
+    const cardEl = document.getElementById('card_number');
+    if (cardEl) cardEl.addEventListener('input', () => {
+      let v = cardEl.value.replace(/\D/g,'').slice(0,16);
+      v = v.replace(/(\d{4})(?=\d)/g,'$1 ');
+      cardEl.value = v;
+    });
+
+    // alterna campos de cartão
+    document.querySelectorAll('input[name="pmethod"]').forEach(r => {
+      r.addEventListener('change', () => {
+        const m = document.querySelector('input[name="pmethod"]:checked').value;
+        cardBox.classList.toggle('hidden', m !== 'card');
+      });
+    });
+
+    // --------- submit ----------
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      statusEl.textContent = 'Processando...';
+      extraEl.innerHTML = '';
+      btn.disabled = true;
+      btn.classList.add("opacity-60","cursor-not-allowed");
+
+      const payload = {
+        name:  document.getElementById('name').value.trim(),
+        email: document.getElementById('email').value.trim(),
+        cpf:   document.getElementById('cpf').value.replace(/\D/g,''),
+        phone: document.getElementById('phone').value.replace(/\D/g,''),
+        method: document.querySelector('input[name="pmethod"]:checked').value,
+        amountBRL: parseAmountBRL(document.getElementById('amount').value),
+        card_number: (document.getElementById('card_number')?.value || '').replace(/\D/g,''),
+        exp_month: Number(document.getElementById('exp_month')?.value || 0),
+        exp_year:  Number(document.getElementById('exp_year')?.value || 0),
+        cvv:       (document.getElementById('cvv')?.value || '').replace(/\D/g,''),
+      };
+
+      try {
+        const res = await fetch('/pay', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const result = await res.json();
+
+        statusEl.textContent = res.ok ? '✅ Pedido criado!' : '❌ ' + (result.error || 'Falha');
+
+        if (result.pix)    extraEl.innerHTML += renderPix(result.pix);
+        if (result.boleto) extraEl.innerHTML += renderBoleto(result.boleto);
+        if (result.card)   extraEl.innerHTML += renderCard(result.card);
+
+        console.log('Resposta completa:', result);
+      } catch (err) {
+        statusEl.textContent = '❌ Erro de conexão com o servidor.';
+        console.error(err);
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove("opacity-60","cursor-not-allowed");
+      }
+    });
+
+    // Prefill via querystring (?name=&email=&cpf=&phone=&amount=&method=)
+    (function prefillFromQS() {
+      const p = new URLSearchParams(location.search);
+      if (p.has('name'))  document.getElementById('name').value = p.get('name');
+      if (p.has('email')) document.getElementById('email').value = p.get('email');
+      if (p.has('cpf'))   document.getElementById('cpf').value = p.get('cpf');
+      if (p.has('phone')) document.getElementById('phone').value = p.get('phone');
+      if (p.has('amount')) document.getElementById('amount').value = p.get('amount');
+      if (p.has('method')) {
+        const m = p.get('method');
+        const radio = document.querySelector(`input[name="pmethod"][value="${m}"]`);
+        if (radio) { radio.checked = true; cardBox.classList.toggle('hidden', m !== 'card'); }
+      }
+    })();
+  </script>
+</body>
+</html>
