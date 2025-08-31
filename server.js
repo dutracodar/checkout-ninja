@@ -1,4 +1,4 @@
-// server.js — Cobrax Checkout (Pagar.me v5) — Pix, Boleto e Cartão
+// server.js — Cobrax Checkout (Pagar.me v5) — Pix, Boleto e Cartão + Shopify Bridge
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -10,19 +10,45 @@ const { randomUUID } = require("crypto");
 require("dotenv").config();
 
 const app = express();
+app.set('trust proxy', 1); // Render/NGINX na frente do Node
 
-// -------- middlewares base --------
+
+/* =========================
+   COBRAX <-> SHOPIFY BRIDGE
+   ========================= */
+const SHOP_DOMAIN   = process.env.SHOPIFY_STORE_DOMAIN;   // ex: "sualoja.myshopify.com"
+const SHOP_VERSION  = process.env.SHOPIFY_API_VERSION || "2024-04";
+const SHOP_TOKEN    = process.env.SHOPIFY_API_TOKEN;
+const PROXY_PREFIX  = process.env.APP_PROXY_PREFIX  || "apps/cobrax";
+const PROXY_SUBPATH = process.env.APP_PROXY_SUBPATH || "checkout";
+const CHECKOUT_BASE = process.env.CHECKOUT_BASE_URL || "https://checkout.pagueleve.com";
+
+// Helper p/ Admin API
+async function shopifyAdmin(path, method = "GET", body = null) {
+  const url = `https://${SHOP_DOMAIN}/admin/api/${SHOP_VERSION}/${path}`;
+  const headers = {
+    "X-Shopify-Access-Token": SHOP_TOKEN,
+    "Content-Type": "application/json",
+  };
+  const opts = { method, headers, timeout: 20000 };
+  if (body) opts.data = body;
+  return axios({ url, ...opts });
+}
+
+/* =========================
+   Middlewares
+   ========================= */
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
 app.use(morgan("combined"));
-app.use(cors()); // como servimos front e back juntos, deixar aberto simplifica
+app.use(cors());
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static("public")); // serve ./public (index.html)
-
-// Rate limit defensivo
+app.use(express.static("public"));
 app.use(rateLimit({ windowMs: 60_000, max: 120 }));
 
-// ---------- helpers ----------
+/* =========================
+   Helpers
+   ========================= */
 const onlyDigits = (s) => (s ? String(s).replace(/\D/g, "") : "");
 
 function brlToCents(v) {
@@ -39,20 +65,11 @@ function authHeader() {
 
 function clientIp(req) {
   return (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
-    .toString()
-    .split(",")[0]
-    .trim();
+    .toString().split(",")[0].trim();
 }
 
 function hasPixFields(tx) {
-  return !!(
-    tx?.qr_code ||
-    tx?.qr_code_text ||
-    tx?.emv ||
-    tx?.qr_code_url ||
-    tx?.image_url ||
-    tx?.qr_code_base64
-  );
+  return !!(tx?.qr_code || tx?.qr_code_text || tx?.emv || tx?.qr_code_url || tx?.image_url || tx?.qr_code_base64);
 }
 
 function hasBoletoFields(tx, charge) {
@@ -69,7 +86,6 @@ async function fetchOrder(orderId) {
   return resp.data;
 }
 
-// Backoff simples p/ aguardar QR/linha do boleto
 async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 async function waitChargeReady(orderId, kind){
   const check = (tx, charge) => (kind === "pix" ? hasPixFields(tx) : hasBoletoFields(tx, charge));
@@ -87,7 +103,23 @@ async function waitChargeReady(orderId, kind){
   return { order, charge: order.charges?.[0] || null, tx: order.charges?.[0]?.last_transaction || null };
 }
 
-// ---------- rota principal ----------
+/* =========================
+   2.1) APP PROXY -> redireciona p/ Cobrax
+   ========================= */
+app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
+  try {
+    const qs = new URLSearchParams(req.query).toString();
+    const target = qs ? `${CHECKOUT_BASE}?${qs}` : CHECKOUT_BASE;
+    return res.redirect(302, target);
+  } catch (e) {
+    console.error("proxy error:", e.message);
+    return res.status(500).send("Proxy error");
+  }
+});
+
+/* =========================
+   /pay — cria ordem no Pagar.me
+   ========================= */
 app.post("/pay", async (req, res) => {
   try {
     if (!process.env.PAGARME_API_KEY) {
@@ -95,18 +127,29 @@ app.post("/pay", async (req, res) => {
     }
 
     const {
-      name, email, cpf, phone,        // DDD + número (10 ou 11 dígitos)
-      method,                         // "pix" | "boleto" | "card"
-      amountBRL,                      // "10,00" | "10.00" | 10
-      // cartão (opcional)
+      name, email, cpf, phone,
+      method,                // "pix" | "boleto" | "card"
+      amountBRL,             // "10,00" | "10.00" | 10
+      total_cents,           // opcional: total em centavos
+      // cartão:
       card_number, exp_month, exp_year, cvv,
+      // itens (string JSON ou array)
+      items
     } = req.body || {};
 
-    // validações básicas
+    // lê itens vindos do front
+    let itemsFromClient = [];
+    try {
+      if (Array.isArray(items)) itemsFromClient = items;
+      else if (typeof items === "string") itemsFromClient = JSON.parse(items);
+    } catch (_) { itemsFromClient = []; }
+
+    // validações
     if (!name || !email) return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
     if (!method) return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
 
-    const amount = Math.max(1, brlToCents(amountBRL || "1"));
+    const centsFromClient = Number.isFinite(Number(total_cents)) ? Number(total_cents) : null;
+    const amount = Math.max(1, centsFromClient != null ? centsFromClient : brlToCents(amountBRL || "1"));
 
     const cpfDigits = onlyDigits(cpf);
     if (cpfDigits.length !== 11) {
@@ -115,10 +158,7 @@ app.post("/pay", async (req, res) => {
 
     const phoneDigits = onlyDigits(phone || "");
     if (phoneDigits.length < 10 || phoneDigits.length > 11) {
-      return res.status(400).json({
-        success: false,
-        error: "Celular inválido. Use DDD + número (10 ou 11 dígitos).",
-      });
+      return res.status(400).json({ success: false, error: "Celular inválido. Use DDD + número (10 ou 11 dígitos)." });
     }
     const area_code = phoneDigits.slice(0, 2);
     const phoneNumber = phoneDigits.slice(2);
@@ -137,20 +177,25 @@ app.post("/pay", async (req, res) => {
       ip,
     };
 
-    // item com 'code' evita falha no boleto (“The item Code is required.”)
-    const items = [
+    // item dummy p/ Pagar.me (ele exige pelo menos 1 item)
+    const itemsForPagarme = [
       { code: "SKU-COBRAX-001", name: "Pedido Cobrax", description: "Checkout Cobrax", quantity: 1, amount },
     ];
 
+    // payments + metadata (inclui itens do carrinho)
     let payments = [];
     if (method === "pix") {
-      payments = [{ payment_method: "pix", pix: { expires_in: 1800 }, metadata: { ua, ip } }]; // 30 min
+      payments = [{
+        payment_method: "pix",
+        pix: { expires_in: 1800 },
+        metadata: { ua, ip, items: itemsFromClient }
+      }];
     } else if (method === "boleto") {
-      const due = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(); // +3 dias
+      const due = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
       payments = [{
         payment_method: "boleto",
         boleto: { due_at: due, instructions: "Pague até o vencimento." },
-        metadata: { ua, ip }
+        metadata: { ua, ip, items: itemsFromClient }
       }];
     } else if (method === "card") {
       if (!card_number || !exp_month || !exp_year || !cvv) {
@@ -177,16 +222,16 @@ app.post("/pay", async (req, res) => {
             state: "SP",
             country: "BR"
           },
-          metadata: { ua, ip }
+          metadata: { ua, ip, items: itemsFromClient }
         }
       }];
     } else {
       return res.status(400).json({ success: false, error: "Método inválido." });
     }
 
-    const payload = { customer, items, payments, closed: true };
+    const payload = { customer, items: itemsForPagarme, payments, closed: true };
 
-    // Idempotência evita duplicar pedidos
+    // Idempotência
     const idempotencyKey = randomUUID();
     const headers = {
       Authorization: authHeader(),
@@ -194,24 +239,21 @@ app.post("/pay", async (req, res) => {
       "Idempotency-Key": idempotencyKey,
     };
 
-    // 1) cria a order
-    const create = await axios.post("https://api.pagar.me/core/v5/orders", payload, {
-      headers, timeout: 30000,
-    });
-
+    // 1) cria a order no Pagar.me
+    const create = await axios.post("https://api.pagar.me/core/v5/orders", payload, { headers, timeout: 30000 });
     let order = create.data;
     let charge = order.charges?.[0];
     let tx = charge?.last_transaction || {};
 
     console.log("🧾 Order:", order.id, "| método:", method);
 
-    // 2) polling p/ PIX e BOLETO com backoff
+    // 2) polling p/ PIX e BOLETO
     if (method === "pix" || method === "boleto") {
       const result = await waitChargeReady(order.id, method);
       order = result.order; charge = result.charge; tx = result.tx || {};
     }
 
-    // --- patch: garante qr_code_base64 quando vier só a URL ---
+    // 3) patch para QR base64 quando vier só URL
     let qrCodeBase64 = tx?.qr_code_base64 || null;
     if (method === "pix" && !qrCodeBase64 && tx?.qr_code_url) {
       try {
@@ -226,7 +268,6 @@ app.post("/pay", async (req, res) => {
       }
     }
 
-    // 3) normaliza resposta pro front
     const out = {
       success: true,
       data: {
@@ -282,30 +323,82 @@ app.post("/pay", async (req, res) => {
   }
 });
 
-// ---------- webhook (cadastre /webhook no dashboard) ----------
-app.post("/webhook", express.json({ type: "*/*" }), (req, res) => {
+/* =========================
+   /webhook — cria pedido na Shopify quando pago
+   ========================= */
+app.post("/webhook", express.json({ type: "*/*" }), async (req, res) => {
   try {
-    const event = req.body?.type || req.body?.event || "unknown";
-    const data = req.body?.data || req.body?.payload || req.body;
+    const body   = req.body || {};
+    const orderId = body?.id || body?.order?.id || body?.data?.id;
 
-    // TODO: persistir/atualizar seu DB com order/charge/tx/status
-    console.log("🔔 Webhook:", JSON.stringify({
-      event,
-      order_id: data?.id || data?.order?.id,
-      charge_id: data?.charges?.[0]?.id || data?.charge?.id,
-      tx_status: data?.charges?.[0]?.last_transaction?.status,
-    }, null, 2));
+    const charges = body?.charges || body?.data?.charges || [];
+    const charge  = charges[0] || body?.charge;
+    const tx      = charge?.last_transaction || {};
+    const status  = tx?.status || charge?.status || body?.status;
 
-    res.sendStatus(200);
+    const isPaid = ["paid", "succeeded", "captured", "approved"]
+      .includes(String(status || "").toLowerCase());
+
+    if (!isPaid) {
+      console.log("Webhook recebido, não pago ainda:", status, "| order:", orderId);
+      return res.sendStatus(200);
+    }
+
+    const amountCents = (charge?.amount || body?.amount || 0);
+    const amountBRL   = (amountCents / 100).toFixed(2);
+
+    const buyerEmail  = body?.customer?.email || body?.customer?.address?.email || "cliente@exemplo.com";
+    const buyerName   = body?.customer?.name || "Cliente Cobrax";
+
+    // ---- Reconstrói items reais (metadata -> Shopify line_items) ----
+    let metaItemsRaw = charge?.metadata?.items ?? body?.metadata?.items ?? body?.items;
+    let parsedItems = [];
+    try {
+      if (Array.isArray(metaItemsRaw)) parsedItems = metaItemsRaw;
+      else if (typeof metaItemsRaw === "string") parsedItems = JSON.parse(metaItemsRaw);
+    } catch (_) { parsedItems = []; }
+
+    let lineItems = [
+      { title: "Pedido Cobrax", quantity: 1, price: amountBRL }
+    ];
+
+    if (parsedItems.length > 0) {
+      lineItems = parsedItems.map(it => ({
+        title: it.title || it.sku || "Item",
+        quantity: Number(it.qty || it.quantity || 1),
+        price: ((it.price_cents ?? 0) / 100).toFixed(2),
+        sku: it.sku || undefined
+      }));
+    }
+
+    const shopifyOrder = {
+      order: {
+        email: buyerEmail,
+        send_receipt: false,
+        send_fulfillment_receipt: false,
+        financial_status: "paid",
+        note: `Pagar.me order ${orderId} / charge ${charge?.id || ""}`,
+        line_items: lineItems,
+        customer: { first_name: buyerName, email: buyerEmail },
+        tags: "cobrax,pagarme",
+      },
+    };
+
+    const r = await shopifyAdmin("orders.json", "POST", shopifyOrder);
+    console.log("✅ Pedido criado na Shopify:", r.data?.order?.id);
+
+    return res.sendStatus(200);
   } catch (e) {
-    console.error("webhook error:", e);
-    res.sendStatus(500);
+    console.error("webhook->shopify error:", e?.response?.data || e.message);
+    return res.sendStatus(200); // evita loop
   }
 });
-// Healthcheck
+
+/* =========================
+   Utilidades
+   ========================= */
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Consultar status de uma order
 app.get("/order/:id", async (req, res) => {
   try {
     const order = await fetchOrder(req.params.id);
@@ -326,14 +419,13 @@ app.get("/order/:id", async (req, res) => {
   }
 });
 
-// Reembolso/cancelamento (total) por charge_id
 app.post("/refund", async (req, res) => {
   try {
     const { charge_id, amount } = req.body || {};
     if (!charge_id) return res.status(400).json({ success: false, error: "charge_id é obrigatório" });
     const r = await axios.post(
       `https://api.pagar.me/core/v5/charges/${charge_id}/cancel`,
-      amount ? { amount } : {}, // opcional: reembolso parcial em centavos
+      amount ? { amount } : {},
       { headers: { Authorization: authHeader() }, timeout: 15000 }
     );
     res.json({ success: true, data: r.data });
