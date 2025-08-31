@@ -1,4 +1,4 @@
-// server.js — Cobrax Checkout (Pagar.me v5) — Pix, Boleto e Cartão + Shopify Bridge
+// server.js — Cobrax Checkout (Pagar.me v5) — Pix, Boleto e Cartão
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -10,13 +10,14 @@ const { randomUUID } = require("crypto");
 require("dotenv").config();
 
 const app = express();
-app.set('trust proxy', 1); // Render/NGINX na frente do Node
 
+// Render/NGINX fica na frente do Node -> necessário p/ req.ip correto (rate-limit, logs)
+app.set("trust proxy", 1);
 
 /* =========================
    COBRAX <-> SHOPIFY BRIDGE
    ========================= */
-const SHOP_DOMAIN   = process.env.SHOPIFY_STORE_DOMAIN;   // ex: "sualoja.myshopify.com"
+const SHOP_DOMAIN   = process.env.SHOPIFY_STORE_DOMAIN;          // "sualoja.myshopify.com"
 const SHOP_VERSION  = process.env.SHOPIFY_API_VERSION || "2024-04";
 const SHOP_TOKEN    = process.env.SHOPIFY_API_TOKEN;
 const PROXY_PREFIX  = process.env.APP_PROXY_PREFIX  || "apps/cobrax";
@@ -24,31 +25,35 @@ const PROXY_SUBPATH = process.env.APP_PROXY_SUBPATH || "checkout";
 const CHECKOUT_BASE = process.env.CHECKOUT_BASE_URL || "https://checkout.pagueleve.com";
 
 // Helper p/ Admin API
-async function shopifyAdmin(path, method = "GET", body = null) {
+async function shopifyAdmin(path, method = "GET", body = null, extraHeaders = {}) {
   const url = `https://${SHOP_DOMAIN}/admin/api/${SHOP_VERSION}/${path}`;
   const headers = {
     "X-Shopify-Access-Token": SHOP_TOKEN,
     "Content-Type": "application/json",
+    ...extraHeaders,
   };
   const opts = { method, headers, timeout: 20000 };
   if (body) opts.data = body;
   return axios({ url, ...opts });
 }
 
-/* =========================
-   Middlewares
-   ========================= */
+// -------- middlewares base --------
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
 app.use(morgan("combined"));
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "1mb", type: "*/*" })); // aceita application/json e */*
 app.use(express.static("public"));
-app.use(rateLimit({ windowMs: 60_000, max: 120 }));
 
-/* =========================
-   Helpers
-   ========================= */
+// Rate limit defensivo (usa req.ip já confiável por causa do trust proxy)
+app.use(rateLimit({
+  windowMs: 60_000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+}));
+
+// ---------- helpers ----------
 const onlyDigits = (s) => (s ? String(s).replace(/\D/g, "") : "");
 
 function brlToCents(v) {
@@ -64,8 +69,10 @@ function authHeader() {
 }
 
 function clientIp(req) {
-  return (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
-    .toString().split(",")[0].trim();
+  return (req.headers["x-forwarded-for"] || req.ip || req.socket.remoteAddress || "")
+    .toString()
+    .split(",")[0]
+    .trim();
 }
 
 function hasPixFields(tx) {
@@ -73,7 +80,7 @@ function hasPixFields(tx) {
 }
 
 function hasBoletoFields(tx, charge) {
-  const url = tx?.url || tx?.pdf?.url || tx?.pdf_url || charge?.url || charge?.pdf?.url || null;
+  const url  = tx?.url || tx?.pdf?.url || tx?.pdf_url || charge?.url || charge?.pdf?.url || null;
   const line = tx?.line || tx?.line_code || charge?.line || charge?.line_code || null;
   return !!(url || line);
 }
@@ -86,6 +93,7 @@ async function fetchOrder(orderId) {
   return resp.data;
 }
 
+// Backoff simples p/ aguardar QR/linha do boleto
 async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 async function waitChargeReady(orderId, kind){
   const check = (tx, charge) => (kind === "pix" ? hasPixFields(tx) : hasBoletoFields(tx, charge));
@@ -104,7 +112,7 @@ async function waitChargeReady(orderId, kind){
 }
 
 /* =========================
-   2.1) APP PROXY -> redireciona p/ Cobrax
+   2.1) APP PROXY -> redireciona pro Cobrax
    ========================= */
 app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
   try {
@@ -118,7 +126,7 @@ app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
 });
 
 /* =========================
-   /pay — cria ordem no Pagar.me
+   /pay — cria ordem no Pagar.me (PIX / Boleto / Cartão)
    ========================= */
 app.post("/pay", async (req, res) => {
   try {
@@ -128,28 +136,15 @@ app.post("/pay", async (req, res) => {
 
     const {
       name, email, cpf, phone,
-      method,                // "pix" | "boleto" | "card"
-      amountBRL,             // "10,00" | "10.00" | 10
-      total_cents,           // opcional: total em centavos
-      // cartão:
+      method,               // "pix" | "boleto" | "card"
+      amountBRL,            // "10,00" | "10.00" | 10
       card_number, exp_month, exp_year, cvv,
-      // itens (string JSON ou array)
-      items
     } = req.body || {};
 
-    // lê itens vindos do front
-    let itemsFromClient = [];
-    try {
-      if (Array.isArray(items)) itemsFromClient = items;
-      else if (typeof items === "string") itemsFromClient = JSON.parse(items);
-    } catch (_) { itemsFromClient = []; }
+    if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
+    if (!method)           return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
 
-    // validações
-    if (!name || !email) return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
-    if (!method) return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
-
-    const centsFromClient = Number.isFinite(Number(total_cents)) ? Number(total_cents) : null;
-    const amount = Math.max(1, centsFromClient != null ? centsFromClient : brlToCents(amountBRL || "1"));
+    const amount = Math.max(1, brlToCents(amountBRL || "1"));
 
     const cpfDigits = onlyDigits(cpf);
     if (cpfDigits.length !== 11) {
@@ -177,25 +172,18 @@ app.post("/pay", async (req, res) => {
       ip,
     };
 
-    // item dummy p/ Pagar.me (ele exige pelo menos 1 item)
-    const itemsForPagarme = [
-      { code: "SKU-COBRAX-001", name: "Pedido Cobrax", description: "Checkout Cobrax", quantity: 1, amount },
-    ];
+    // item com 'code' evita falha no boleto (“The item Code is required.”)
+    const items = [{ code: "SKU-COBRAX-001", name: "Pedido Cobrax", description: "Checkout Cobrax", quantity: 1, amount }];
 
-    // payments + metadata (inclui itens do carrinho)
     let payments = [];
     if (method === "pix") {
-      payments = [{
-        payment_method: "pix",
-        pix: { expires_in: 1800 },
-        metadata: { ua, ip, items: itemsFromClient }
-      }];
+      payments = [{ payment_method: "pix", pix: { expires_in: 1800 }, metadata: { ua, ip } }];
     } else if (method === "boleto") {
       const due = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
       payments = [{
         payment_method: "boleto",
         boleto: { due_at: due, instructions: "Pague até o vencimento." },
-        metadata: { ua, ip, items: itemsFromClient }
+        metadata: { ua, ip }
       }];
     } else if (method === "card") {
       if (!card_number || !exp_month || !exp_year || !cvv) {
@@ -222,16 +210,16 @@ app.post("/pay", async (req, res) => {
             state: "SP",
             country: "BR"
           },
-          metadata: { ua, ip, items: itemsFromClient }
+          metadata: { ua, ip }
         }
       }];
     } else {
       return res.status(400).json({ success: false, error: "Método inválido." });
     }
 
-    const payload = { customer, items: itemsForPagarme, payments, closed: true };
+    const payload = { customer, items, payments, closed: true };
 
-    // Idempotência
+    // Idempotência evita duplicar pedidos
     const idempotencyKey = randomUUID();
     const headers = {
       Authorization: authHeader(),
@@ -241,19 +229,20 @@ app.post("/pay", async (req, res) => {
 
     // 1) cria a order no Pagar.me
     const create = await axios.post("https://api.pagar.me/core/v5/orders", payload, { headers, timeout: 30000 });
+
     let order = create.data;
     let charge = order.charges?.[0];
     let tx = charge?.last_transaction || {};
 
     console.log("🧾 Order:", order.id, "| método:", method);
 
-    // 2) polling p/ PIX e BOLETO
+    // 2) polling p/ PIX e BOLETO com backoff
     if (method === "pix" || method === "boleto") {
       const result = await waitChargeReady(order.id, method);
       order = result.order; charge = result.charge; tx = result.tx || {};
     }
 
-    // 3) patch para QR base64 quando vier só URL
+    // --- patch: garante qr_code_base64 quando vier só a URL ---
     let qrCodeBase64 = tx?.qr_code_base64 || null;
     if (method === "pix" && !qrCodeBase64 && tx?.qr_code_url) {
       try {
@@ -268,6 +257,7 @@ app.post("/pay", async (req, res) => {
       }
     }
 
+    // 3) normaliza resposta pro front
     const out = {
       success: true,
       data: {
@@ -310,11 +300,7 @@ app.post("/pay", async (req, res) => {
   } catch (err) {
     const status = err.response?.status || 500;
     const data = err.response?.data;
-    console.error("❌ Erro Pagar.me:", {
-      status,
-      message: data?.message || err.message,
-      errors: data?.errors,
-    });
+    console.error("❌ Erro Pagar.me:", { status, message: data?.message || err.message, errors: data?.errors });
     return res.status(status).json({
       success: false,
       error: data?.message || err.message || "Falha ao processar pagamento",
@@ -324,7 +310,7 @@ app.post("/pay", async (req, res) => {
 });
 
 /* =========================
-   /webhook — cria pedido na Shopify quando pago
+   2.2) WEBHOOK Pagar.me -> cria pedido na Shopify quando pago (com line_items reais)
    ========================= */
 app.post("/webhook", express.json({ type: "*/*" }), async (req, res) => {
   try {
@@ -332,44 +318,51 @@ app.post("/webhook", express.json({ type: "*/*" }), async (req, res) => {
     const orderId = body?.id || body?.order?.id || body?.data?.id;
 
     const charges = body?.charges || body?.data?.charges || [];
-    const charge  = charges[0] || body?.charge;
+    const charge  = charges[0] || body?.charge || {};
     const tx      = charge?.last_transaction || {};
-    const status  = tx?.status || charge?.status || body?.status;
+    const status  = (tx?.status || charge?.status || body?.status || "").toLowerCase();
 
-    const isPaid = ["paid", "succeeded", "captured", "approved"]
-      .includes(String(status || "").toLowerCase());
+    // Só cria pedido na Shopify quando considerar "pago"
+    const isPaid = ["paid", "succeeded", "captured", "approved"].includes(status);
 
     if (!isPaid) {
       console.log("Webhook recebido, não pago ainda:", status, "| order:", orderId);
       return res.sendStatus(200);
     }
 
-    const amountCents = (charge?.amount || body?.amount || 0);
+    // total da cobrança (centavos)
+    const amountCents = Number(charge?.amount || body?.amount || 0);
     const amountBRL   = (amountCents / 100).toFixed(2);
 
     const buyerEmail  = body?.customer?.email || body?.customer?.address?.email || "cliente@exemplo.com";
-    const buyerName   = body?.customer?.name || "Cliente Cobrax";
+    const buyerName   = body?.customer?.name  || "Cliente Cobrax";
 
-    // ---- Reconstrói items reais (metadata -> Shopify line_items) ----
+    // ==== NOVO: tenta ler items vindos no webhook/metadata ====
     let metaItemsRaw = charge?.metadata?.items ?? body?.metadata?.items ?? body?.items;
     let parsedItems = [];
     try {
       if (Array.isArray(metaItemsRaw)) parsedItems = metaItemsRaw;
       else if (typeof metaItemsRaw === "string") parsedItems = JSON.parse(metaItemsRaw);
-    } catch (_) { parsedItems = []; }
+    } catch(e){ parsedItems = []; }
 
-    let lineItems = [
-      { title: "Pedido Cobrax", quantity: 1, price: amountBRL }
-    ];
+    // Fallback 1 item
+    let lineItems = [{ title: "Pedido Cobrax", quantity: 1, price: amountBRL }];
 
     if (parsedItems.length > 0) {
+      // Se vierem itens com price_cents -> monta cada um
       lineItems = parsedItems.map(it => ({
         title: it.title || it.sku || "Item",
         quantity: Number(it.qty || it.quantity || 1),
-        price: ((it.price_cents ?? 0) / 100).toFixed(2),
-        sku: it.sku || undefined
+        price: ((Number(it.price_cents ?? 0)) / 100).toFixed(2),
+        sku: it.sku || undefined,
       }));
     }
+
+    const noteAttrs = [];
+    if (orderId)        noteAttrs.push({ name: "pagarme_order_id", value: String(orderId) });
+    if (charge?.id)     noteAttrs.push({ name: "pagarme_charge_id", value: String(charge.id) });
+    if (tx?.id)         noteAttrs.push({ name: "pagarme_tx_id", value: String(tx.id) });
+    if (status)         noteAttrs.push({ name: "pagarme_status", value: status });
 
     const shopifyOrder = {
       order: {
@@ -377,28 +370,32 @@ app.post("/webhook", express.json({ type: "*/*" }), async (req, res) => {
         send_receipt: false,
         send_fulfillment_receipt: false,
         financial_status: "paid",
+        currency: "BRL",
         note: `Pagar.me order ${orderId} / charge ${charge?.id || ""}`,
+        note_attributes: noteAttrs,
         line_items: lineItems,
         customer: { first_name: buyerName, email: buyerEmail },
         tags: "cobrax,pagarme",
       },
     };
 
-    const r = await shopifyAdmin("orders.json", "POST", shopifyOrder);
-    console.log("✅ Pedido criado na Shopify:", r.data?.order?.id);
+    // Idempotência na Shopify (evita duplicata se Pagar.me reenviar)
+    const idem = `pagarme-${orderId}-${charge?.id || "nocharge"}`;
+    const r = await shopifyAdmin("orders.json", "POST", shopifyOrder, { "Idempotency-Key": idem });
 
+    console.log("✅ Pedido criado na Shopify:", r.data?.order?.id, "| itens:", lineItems.length);
     return res.sendStatus(200);
   } catch (e) {
+    // responde 200 pra evitar loop de retentativas do Pagar.me
     console.error("webhook->shopify error:", e?.response?.data || e.message);
-    return res.sendStatus(200); // evita loop
+    return res.sendStatus(200);
   }
 });
 
-/* =========================
-   Utilidades
-   ========================= */
+// Healthcheck
 app.get("/health", (req, res) => res.json({ ok: true }));
 
+// Consultar status de uma order no Pagar.me
 app.get("/order/:id", async (req, res) => {
   try {
     const order = await fetchOrder(req.params.id);
@@ -419,6 +416,7 @@ app.get("/order/:id", async (req, res) => {
   }
 });
 
+// Reembolso/cancelamento (total/parcial) por charge_id
 app.post("/refund", async (req, res) => {
   try {
     const { charge_id, amount } = req.body || {};
