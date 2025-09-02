@@ -41,7 +41,7 @@
         <input id="neighborhood" class="col-span-1 px-4 py-2 border rounded" placeholder="Bairro" />
         <input id="complement" class="col-span-1 px-4 py-2 border rounded" placeholder="Complemento" />
       </div>
-      <p class="text-xs text-gray-500">Preencha para cálculo fiscal e envio. (Usado também na fatura/entrega.)</p>
+      <p class="text-xs text-gray-500">Frete grátis. Endereço usado para nota fiscal e entrega.</p>
     </div>
 
     <!-- MÉTODO -->
@@ -66,24 +66,14 @@
       <!-- Parcelas -->
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Parcelas</label>
-        <select id="installments" class="w-full px-4 py-2 border rounded">
-          <option value="1">1x (sem juros)</option>
-          <option value="2">2x</option><option value="3">3x</option><option value="4">4x</option>
-          <option value="5">5x</option><option value="6">6x</option><option value="7">7x</option>
-          <option value="8">8x</option><option value="9">9x</option><option value="10">10x</option>
-          <option value="11">11x</option><option value="12">12x</option>
-        </select>
-        <p class="text-xs text-gray-500 mt-1" id="installmentsHint">
-          Parcelamento com juros do adquirente (configurado na Pagar.me).
-        </p>
+        <select id="installments" class="w-full px-4 py-2 border rounded"></select>
+        <p class="text-xs text-gray-500 mt-1">Parcelamento com juros do emissor (configurado na Pagar.me).</p>
       </div>
     </div>
 
     <div class="flex gap-2">
       <button id="pay-btn" type="submit" class="flex-1 bg-black text-white font-bold py-2 rounded hover:opacity-90">Pagar</button>
-      <!-- Botão confirm manual -->
-      <button id="confirm-btn" type="button" disabled
-              class="px-3 py-2 rounded border border-gray-300 text-gray-600 disabled:opacity-50">
+      <button id="confirm-btn" type="button" disabled class="w-36 bg-gray-200 text-gray-600 font-semibold py-2 rounded cursor-not-allowed">
         Já paguei
       </button>
     </div>
@@ -100,143 +90,137 @@
     const btnPay   = document.getElementById('pay-btn');
     const btnConfirm = document.getElementById('confirm-btn');
     const installmentsEl = document.getElementById('installments');
-    const amountEl = document.getElementById('amount');
+    let lastOrderId = null; // guarda o order_id pra usar no /confirm
 
-    let lastOrderId = null; // preenchido após /pay
+    // ===== utils =====
+    const brl = (n)=> (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+    function parseAmountBRL(v){ return String(v||'').replace(/[^\d,.\s]/g,'').replace(/\s+/g,'').replace(',','.'); }
 
-    /* ========= PREFILL SEGURO: cart_id & total_cents ========= */
-    (function securePrefillFromCart() {
+    // ===== PREFILL seguro (cart_id / total_cents) e lock do valor =====
+    (function securePrefillFromCart(){
       const qs = new URLSearchParams(location.search);
       const cartId = qs.get('cart_id') || '';
       const totalRaw = qs.get('total_cents');
-      const totalCents = totalRaw !== null ? parseInt(totalRaw, 10) : NaN;
+      const totalCents = totalRaw !== null ? parseInt(totalRaw,10) : NaN;
 
       const cartHidden  = document.getElementById('cart_id');
       const totalHidden = document.getElementById('total_cents');
+      const amountEl    = document.getElementById('amount');
 
       if (cartHidden && cartId) cartHidden.value = cartId;
       if (totalHidden && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
 
       if (amountEl && !Number.isNaN(totalCents)) {
-        amountEl.value = (totalCents / 100).toFixed(2).replace('.', ',');
+        amountEl.value = (totalCents/100).toFixed(2).replace('.',',');
         amountEl.readOnly = true;
         amountEl.classList.add('bg-gray-50');
         amountEl.title = 'Valor definido pelo carrinho da loja';
       }
 
-      form.addEventListener('submit', function () {
+      form.addEventListener('submit', function(){
         if (cartHidden && !cartHidden.value) cartHidden.value = cartId || '';
-        if (totalHidden && !totalHidden.value && !Number.isNaN(totalCents)) {
-          totalHidden.value = String(totalCents);
-        }
+        if (totalHidden && !totalHidden.value && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
       });
     })();
 
-    // --------- helpers ----------
-    function parseAmountBRL(v) {
-      return String(v || '').replace(/[^\d,.\s]/g,'').replace(/\s+/g,'').replace(',','.');
+    // ===== monta opções de parcelas com valor (1x sem juros / demais "juros do emissor") =====
+    function amountToNumber(){
+      const v = parseFloat(parseAmountBRL(document.getElementById('amount').value));
+      return Number.isFinite(v) ? v : 0;
     }
-    function formatBRL(n){
-      return n.toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2});
+    function buildInstallments(){
+      if (!installmentsEl) return;
+      const total = amountToNumber();
+      let html = '';
+      for (let n=1; n<=12; n++){
+        const per = total / n;
+        const label = n===1 ? '(sem juros)' : '(juros do emissor)';
+        html += `<option value="${n}">${n}x de ${brl(per)} ${label}</option>`;
+      }
+      installmentsEl.innerHTML = html;
     }
-    async function copy(text) {
-      try { await navigator.clipboard.writeText(text); alert("Copiado!"); }
-      catch { alert("Não foi possível copiar."); }
+    buildInstallments();
+    const amountElForChange = document.getElementById('amount');
+    if (amountElForChange && !amountElForChange.readOnly){
+      amountElForChange.addEventListener('input', buildInstallments);
     }
-    function renderPix(pix) {
+
+    // ===== render helpers =====
+    async function copy(text){ try{ await navigator.clipboard.writeText(text); alert('Copiado!'); }catch{ alert('Não foi possível copiar.'); } }
+    function renderPix(pix){
       let html = '<div class="p-3 border rounded"><div class="font-semibold mb-1">Pix gerado:</div>';
       if (pix.qr_code_base64) html += `<img class="mx-auto" alt="QR Pix" src="data:image/png;base64,${pix.qr_code_base64}" />`;
       if (pix.qr_code_url) html += `<div class="mt-2"><a class="text-blue-600 underline" target="_blank" rel="noopener noreferrer" href="${pix.qr_code_url}">Abrir QR Code</a></div>`;
-      if (pix.qr_code) {
+      if (pix.qr_code){
         const copyStr = JSON.stringify(pix.qr_code);
         html += `<div class="mt-2 break-all"><strong>Copia & Cola:</strong><br>${pix.qr_code}
-                 <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick='copy(${copyStr})'>Copiar</button></div>`;
+          <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick='copy(${copyStr})'>Copiar</button></div>`;
       }
       html += '</div>'; return html;
     }
-    function renderBoleto(b) {
+    function renderBoleto(b){
       let html = '<div class="p-3 border rounded"><div class="font-semibold mb-1">Boleto gerado</div>';
       if (b.url) html += `<div><a class="text-blue-600 underline" target="_blank" rel="noopener noreferrer" href="${b.url}">Abrir boleto (PDF)</a></div>`;
-      if (b.line) {
+      if (b.line){
         const copyStr = JSON.stringify(b.line);
         html += `<div class="mt-2 break-all"><strong>Linha digitável:</strong><br>${b.line}
-                 <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick='copy(${copyStr})'>Copiar</button></div>`;
+          <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick='copy(${copyStr})'>Copiar</button></div>`;
       }
       html += '</div>'; return html;
     }
-    function renderCard(c) {
+    function renderCard(c){
       const { status, reason, acquirer_message, code } = c;
       const det = reason || acquirer_message || code;
-      return `<div class="p-3 border rounded">
-        <strong>Status do cartão:</strong> ${status || 'desconhecido'}
-        ${det ? `<div class="mt-1 text-xs text-gray-600">Detalhe: ${det}</div>` : ''}
-      </div>`;
+      return `<div class="p-3 border rounded"><strong>Status do cartão:</strong> ${status || 'desconhecido'}
+        ${det ? `<div class="mt-1 text-xs text-gray-600">Detalhe: ${det}</div>` : ''}</div>`;
     }
 
-    // --------- máscaras leves ----------
+    // ===== máscaras leves =====
     const cpfEl = document.getElementById('cpf');
-    cpfEl.addEventListener('input', () => {
+    cpfEl.addEventListener('input', ()=>{
       let v = cpfEl.value.replace(/\D/g,'').slice(0,11);
       v = v.replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d{1,2})$/,'$1-$2');
       cpfEl.value = v;
     });
     const phoneEl = document.getElementById('phone');
-    phoneEl.addEventListener('input', () => {
+    phoneEl.addEventListener('input', ()=>{
       let v = phoneEl.value.replace(/\D/g,'').slice(0,11);
-      if (v.length > 10) v = v.replace(/(\d{2})(\d{5})(\d{4})/, '$1 $2-$3');
-      else v = v.replace(/(\d{2})(\d{4})(\d{0,4})/, '$1 $2-$3');
+      if (v.length>10) v=v.replace(/(\d{2})(\d{5})(\d{4})/,'$1 $2-$3');
+      else v=v.replace(/(\d{2})(\d{4})(\d{0,4})/,'$1 $2-$3');
       phoneEl.value = v.trim();
     });
     const cepEl = document.getElementById('cep');
-    cepEl.addEventListener('input', () => {
+    cepEl.addEventListener('input', ()=>{
       let v = cepEl.value.replace(/\D/g,'').slice(0,8);
-      if (v.length > 5) v = v.replace(/(\d{5})(\d{0,3})/,'$1-$2');
+      if (v.length>5) v=v.replace(/(\d{5})(\d{0,3})/,'$1-$2');
       cepEl.value = v;
     });
     const ufEl = document.getElementById('state');
-    ufEl.addEventListener('input', () => { ufEl.value = ufEl.value.replace(/[^A-Za-z]/g,'').toUpperCase().slice(0,2); });
-
+    ufEl.addEventListener('input', ()=>{ ufEl.value = ufEl.value.replace(/[^A-Za-z]/g,'').toUpperCase().slice(0,2); });
     const cardEl = document.getElementById('card_number');
-    if (cardEl) cardEl.addEventListener('input', () => {
+    if (cardEl) cardEl.addEventListener('input', ()=>{
       let v = cardEl.value.replace(/\D/g,'').slice(0,16);
       v = v.replace(/(\d{4})(?=\d)/g,'$1 ');
       cardEl.value = v;
     });
 
     // alterna campos de cartão
-    document.querySelectorAll('input[name="pmethod"]').forEach(r => {
-      r.addEventListener('change', () => {
+    document.querySelectorAll('input[name="pmethod"]').forEach(r=>{
+      r.addEventListener('change', ()=>{
         const m = document.querySelector('input[name="pmethod"]:checked').value;
         cardBox.classList.toggle('hidden', m !== 'card');
       });
     });
 
-    // ---- labels de parcelas (sem juros; só informativo) ----
-    function updateInstallmentLabels(){
-      const amt = Number(parseAmountBRL(amountEl.value) || 0);
-      if (!amt || !isFinite(amt)) return;
-      const options = installmentsEl.querySelectorAll('option');
-      options.forEach(opt => {
-        const n = Number(opt.value);
-        if (!n) return;
-        const per = amt / n;
-        if (n === 1) {
-          opt.textContent = `1x de R$ ${formatBRL(amt)} (sem juros)`;
-        } else {
-          opt.textContent = `${n}x de R$ ${formatBRL(per)} (juros no emissor)`;
-        }
-      });
-    }
-    amountEl.addEventListener('input', updateInstallmentLabels);
-    updateInstallmentLabels();
-
-    // --------- submit /pay ----------
-    form.addEventListener('submit', async (e) => {
+    // ===== submit /pay =====
+    form.addEventListener('submit', async (e)=>{
       e.preventDefault();
       statusEl.textContent = 'Processando...';
       extraEl.innerHTML = '';
-      btnPay.disabled = true;
+      btnPay.disabled = true; btnConfirm.disabled = true;
       btnPay.classList.add("opacity-60","cursor-not-allowed");
+      btnConfirm.classList.add("cursor-not-allowed","bg-gray-200","text-gray-600");
+      lastOrderId = null;
 
       const payload = {
         name:  document.getElementById('name').value.trim(),
@@ -244,20 +228,17 @@
         cpf:   document.getElementById('cpf').value.replace(/\D/g,''),
         phone: document.getElementById('phone').value.replace(/\D/g,''),
         method: document.querySelector('input[name="pmethod"]:checked').value,
-        amountBRL: parseAmountBRL(amountEl.value),
+        amountBRL: parseAmountBRL(document.getElementById('amount').value),
 
-        // rastreio/concília
         cart_id: document.getElementById('cart_id').value || null,
         total_cents: document.getElementById('total_cents').value || null,
 
-        // cartão
         card_number: (document.getElementById('card_number')?.value || '').replace(/\D/g,''),
         exp_month: Number(document.getElementById('exp_month')?.value || 0),
         exp_year:  Number(document.getElementById('exp_year')?.value || 0),
         cvv:       (document.getElementById('cvv')?.value || '').replace(/\D/g,''),
         installments: Number(document.getElementById('installments')?.value || 1),
 
-        // endereço
         address: {
           cep: document.getElementById('cep').value.replace(/\D/g,''),
           address1: document.getElementById('address1').value.trim(),
@@ -269,75 +250,69 @@
         }
       };
 
-      try {
-        const res = await fetch('/pay', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
+      try{
+        const res = await fetch('/pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
         const result = await res.json();
 
         statusEl.textContent = res.ok ? '✅ Pedido criado!' : '❌ ' + (result.error || 'Falha');
 
-        // habilita "Já paguei" se tiver order_id
-        lastOrderId = result?.data?.order_id || null;
-        btnConfirm.disabled = !lastOrderId;
+        if (result?.data?.order_id) lastOrderId = result.data.order_id;
 
         if (result.pix)    extraEl.innerHTML += renderPix(result.pix);
         if (result.boleto) extraEl.innerHTML += renderBoleto(result.boleto);
         if (result.card)   extraEl.innerHTML += renderCard(result.card);
 
+        // habilita "Já paguei" quando for PIX/BOLETO (confirma manual)
+        const m = payload.method;
+        if (res.ok && lastOrderId && (m==='pix' || m==='boleto')){
+          btnConfirm.disabled = false;
+          btnConfirm.classList.remove("cursor-not-allowed","bg-gray-200","text-gray-600");
+          btnConfirm.classList.add("bg-white","border","hover:bg-gray-50");
+        }
         console.log('Resposta completa:', result);
-      } catch (err) {
+      }catch(err){
         statusEl.textContent = '❌ Erro de conexão com o servidor.';
         console.error(err);
-      } finally {
+      }finally{
         btnPay.disabled = false;
         btnPay.classList.remove("opacity-60","cursor-not-allowed");
       }
     });
 
-    // --------- botão "Já paguei" -> /confirm ----------
-    btnConfirm.addEventListener('click', async () => {
+    // ===== botão "Já paguei" -> POST /confirm =====
+    btnConfirm.addEventListener('click', async ()=>{
       if (!lastOrderId) return;
       btnConfirm.disabled = true;
-      statusEl.textContent = 'Checando pagamento...';
-      try {
-        const res = await fetch('/confirm', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ order_id: lastOrderId })
-        });
-        const data = await res.json();
-        if (data.ok && data.paid) {
+      btnConfirm.textContent = 'Checando...';
+      try{
+        const r = await fetch('/confirm',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ order_id: lastOrderId }) });
+        const j = await r.json();
+        if (j.ok && j.paid){
           statusEl.textContent = '✅ Pagamento confirmado! Pedido criado na loja.';
-        } else {
-          statusEl.textContent = '⏳ Ainda não foi pago. Tente novamente em alguns segundos.';
-          btnConfirm.disabled = false;
+        }else{
+          statusEl.textContent = '⏳ Ainda não consta como pago. Tente novamente em alguns segundos.';
         }
-      } catch (e) {
-        statusEl.textContent = '❌ Falha ao confirmar.';
+      }catch(e){
+        statusEl.textContent = '❌ Falha ao confirmar pagamento.';
+      }finally{
         btnConfirm.disabled = false;
+        btnConfirm.textContent = 'Já paguei';
       }
     });
 
-    // Prefill extra (não sobrescreve o valor travado)
-    (function prefillFromQS() {
+    // Prefill extra (não sobrescreve valor travado)
+    (function prefillFromQS(){
       const p = new URLSearchParams(location.search);
       if (p.has('name'))  document.getElementById('name').value = p.get('name');
       if (p.has('email')) document.getElementById('email').value = p.get('email');
       if (p.has('cpf'))   document.getElementById('cpf').value = p.get('cpf');
       if (p.has('phone')) document.getElementById('phone').value = p.get('phone');
-      if (p.has('amount')) {
-        if (!amountEl.readOnly) amountEl.value = p.get('amount');
-      }
-      if (p.has('method')) {
+      if (p.has('amount')){ const amt=document.getElementById('amount'); if(!amt.readOnly) amt.value=p.get('amount'); }
+      if (p.has('method')){
         const m = p.get('method');
         const radio = document.querySelector(`input[name="pmethod"][value="${m}"]`);
-        if (radio) { radio.checked = true; cardBox.classList.toggle('hidden', m !== 'card'); }
+        if (radio){ radio.checked = true; cardBox.classList.toggle('hidden', m!=='card'); }
       }
-      // atualiza rótulos de parcelas se amount veio por QS
-      updateInstallmentLabels();
     })();
   </script>
 </body>
