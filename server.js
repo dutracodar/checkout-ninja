@@ -36,15 +36,19 @@ async function shopifyAdmin(pathApi, method = "GET", body = null, extraHeaders =
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
 app.use(morgan("combined"));
-app.use(cors());
+app.use(cors()); // mantém liberado por enquanto (produção: podemos restringir)
 app.use(express.json({ limit: "1mb", type: "*/*" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
 
 // ---------- helpers ----------
 const onlyDigits = (s) => (s ? String(s).replace(/\D/g, "") : "");
-function brlToCents(v) { if (v == null) return 0; if (typeof v === "number") return Math.round(v * 100);
-  const n = Number(String(v).replace(/\./g, "").replace(",", ".")); return Number.isFinite(n) ? Math.round(n * 100) : 0; }
+function brlToCents(v) {
+  if (v == null) return 0;
+  if (typeof v === "number") return Math.round(v * 100);
+  const n = Number(String(v).replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+}
 function authHeader() { const key = process.env.PAGARME_API_KEY || ""; return "Basic " + Buffer.from(`${key}:`).toString("base64"); }
 function clientIp(req) { return (req.headers["x-forwarded-for"] || req.ip || req.socket.remoteAddress || "").toString().split(",")[0].trim(); }
 async function fetchOrder(orderId) {
@@ -52,15 +56,26 @@ async function fetchOrder(orderId) {
   return resp.data;
 }
 const hasPixFields = (tx) => !!(tx?.qr_code || tx?.qr_code_text || tx?.emv || tx?.qr_code_url || tx?.image_url || tx?.qr_code_base64);
-function hasBoletoFields(tx, charge) { const url = tx?.url || tx?.pdf?.url || tx?.pdf_url || charge?.url || charge?.pdf?.url || null;
-  const line = tx?.line || tx?.line_code || charge?.line || charge?.line_code || null; return !!(url || line); }
+function hasBoletoFields(tx, charge) {
+  const url  = tx?.url || tx?.pdf?.url || tx?.pdf_url || charge?.url || charge?.pdf?.url || null;
+  const line = tx?.line || tx?.line_code || charge?.line || charge?.line_code || null;
+  return !!(url || line);
+}
 async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 async function waitChargeReady(orderId, kind){
   const check = (tx, charge) => (kind === "pix" ? hasPixFields(tx) : hasBoletoFields(tx, charge));
   let tries = 0, delay = 600;
-  while (tries < 6) { const order = await fetchOrder(orderId); const charge = order.charges?.[0]; const tx = charge?.last_transaction || {};
-    if (check(tx, charge)) return { order, charge, tx }; await sleep(delay); delay = Math.min(delay * 1.6, 3000); tries++; }
-  const order = await fetchOrder(orderId); return { order, charge: order.charges?.[0] || null, tx: order.charges?.[0]?.last_transaction || null };
+  while (tries < 6) {
+    const order = await fetchOrder(orderId);
+    const charge = order.charges?.[0];
+    const tx = charge?.last_transaction || {};
+    if (check(tx, charge)) return { order, charge, tx };
+    await sleep(delay);
+    delay = Math.min(delay * 1.6, 3000);
+    tries++;
+  }
+  const order = await fetchOrder(orderId);
+  return { order, charge: order.charges?.[0] || null, tx: order.charges?.[0]?.last_transaction || null };
 }
 
 /* =========================
@@ -128,6 +143,19 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
   if (txId)       noteAttrs.push({ name: "pagarme_tx_id", value: String(txId) });
   if (status)     noteAttrs.push({ name: "pagarme_status", value: status });
 
+  // endereço de entrega (se veio no payload da Pagar.me)
+  const shipping_address = body?.shipping ? {
+    first_name: buyerName,
+    address1: body.shipping.address?.line_1 || '',
+    address2: body.shipping.address?.line_2 || '',
+    city: body.shipping.address?.city || '',
+    province: body.shipping.address?.state || '',
+    country: 'Brazil',
+    country_code: 'BR',
+    zip: body.shipping.address?.zip_code || '',
+    phone: onlyDigits(body?.customer?.phones?.mobile_phone?.number || "") || undefined
+  } : undefined;
+
   const shopifyOrder = {
     order: {
       email: buyerEmail,
@@ -139,6 +167,7 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
       note_attributes: noteAttrs,
       line_items: lineItems,
       customer: { first_name: buyerName, email: buyerEmail },
+      shipping_address,
       tags: "cobrax,pagarme",
     },
   };
@@ -149,7 +178,7 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
 }
 
 /* =========================
-   API — inicia o fluxo (substitui teste antigo de GET /checkout)
+   API — inicia o fluxo
    ========================= */
 app.get("/api/checkout-start", (req, res) => {
   const cart_id = String(req.query.cart_id || "").trim();
@@ -166,23 +195,67 @@ app.post("/pay", async (req, res) => {
   try {
     if (!process.env.PAGARME_API_KEY) return res.status(500).json({ success: false, error: "PAGARME_API_KEY ausente no .env" });
 
-    const { name, email, cpf, phone, method, amountBRL, card_number, exp_month, exp_year, cvv } = req.body || {};
+    const {
+      name, email, cpf, phone,
+      method,               // "pix" | "boleto" | "card"
+      amountBRL,
+      card_number, exp_month, exp_year, cvv,
+      installments,         // NOVO
+      address               // NOVO { cep, address1, number, complement, neighborhood, city, state }
+    } = req.body || {};
+
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
     if (!method)          return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
 
     const amount = Math.max(1, brlToCents(amountBRL || "1"));
-    const onlyDigitsLocal = (s) => (s ? String(s).replace(/\D/g, "") : "");
-    const cpfDigits = onlyDigitsLocal(cpf);
+    const cpfDigits = onlyDigits(cpf);
     if (cpfDigits.length !== 11) return res.status(400).json({ success: false, error: "CPF inválido. Use 11 dígitos." });
 
-    const phoneDigits = onlyDigitsLocal(phone || "");
+    const phoneDigits = onlyDigits(phone || "");
     if (phoneDigits.length < 10 || phoneDigits.length > 11) return res.status(400).json({ success: false, error: "Celular inválido. Use DDD + número (10 ou 11 dígitos)." });
     const area_code = phoneDigits.slice(0, 2); const phoneNumber = phoneDigits.slice(2);
 
-    const ip = clientIp(req); const ua = req.headers["user-agent"] || "";
-    const customer = { name, email, type: "individual", document: cpfDigits, tax_id: cpfDigits,
-      documents: [{ type: "cpf", number: cpfDigits }], phones: { mobile_phone: { country_code: "55", area_code, number: phoneNumber } }, ip };
+    const cepDigits = onlyDigits(address?.cep || "");
+    if (address && cepDigits && cepDigits.length !== 8) {
+      return res.status(400).json({ success:false, error:"CEP inválido (8 dígitos)." });
+    }
 
+    const ip = clientIp(req); const ua = req.headers["user-agent"] || "";
+
+    const customer = {
+      name,
+      email,
+      type: "individual",
+      document: cpfDigits,
+      tax_id: cpfDigits,
+      documents: [{ type: "cpf", number: cpfDigits }],
+      phones: { mobile_phone: { country_code: "55", area_code, number: phoneNumber } },
+      ip,
+    };
+
+    const billing_address = {
+      line_1: `${address?.address1 || ''}${address?.number ? ', ' + address.number : ''}`.trim(),
+      line_2: address?.complement || '',
+      zip_code: cepDigits || '00000000',
+      neighborhood: address?.neighborhood || '',
+      city: address?.city || '',
+      state: address?.state || '',
+      country: "BR"
+    };
+
+    const shipping = {
+      name,
+      address: {
+        line_1: billing_address.line_1,
+        zip_code: billing_address.zip_code,
+        city: billing_address.city,
+        state: billing_address.state,
+        country: "BR"
+      },
+      fee: 0
+    };
+
+    // item simples
     const items = [{ code: "SKU-COBRAX-001", name: "Pedido Cobrax", description: "Checkout Cobrax", quantity: 1, amount }];
 
     let payments = [];
@@ -192,14 +265,25 @@ app.post("/pay", async (req, res) => {
       const due = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
       payments = [{ payment_method: "boleto", boleto: { due_at: due, instructions: "Pague até o vencimento." }, metadata: { ua, ip } }];
     } else if (method === "card") {
-      if (!card_number || !exp_month || !exp_year || !cvv) return res.status(400).json({ success: false, error: "Dados do cartão incompletos." });
+      if (!card_number || !exp_month || !exp_year || !cvv) {
+        return res.status(400).json({ success: false, error: "Dados do cartão incompletos." });
+      }
+      const cardInstallments = Math.max(1, Number(installments || 1));
       payments = [{
         payment_method: "credit_card",
         credit_card: {
-          capture: true, installments: 1, statement_descriptor: "COBRAX",
-          card: { number: String(card_number).replace(/\s+/g, ""), exp_month: Number(exp_month), exp_year: Number(exp_year), cvv: String(cvv), holder: { name } },
+          capture: true,
+          installments: cardInstallments, // PARCELAS
+          statement_descriptor: "COBRAX",
+          card: {
+            number: String(card_number).replace(/\s+/g, ""),
+            exp_month: Number(exp_month),
+            exp_year: Number(exp_year),
+            cvv: String(cvv),
+            holder: { name }
+          },
           holder_document: cpfDigits,
-          billing_address: { line_1: "Rua Teste, 123", zip_code: "01311000", city: "São Paulo", state: "SP", country: "BR" },
+          billing_address,
           metadata: { ua, ip }
         }
       }];
@@ -207,16 +291,22 @@ app.post("/pay", async (req, res) => {
       return res.status(400).json({ success: false, error: "Método inválido." });
     }
 
-    const payload = { customer, items, payments, closed: true };
+    const payload = { customer, items, payments, closed: true, shipping };
     const headers = { Authorization: authHeader(), "Content-Type": "application/json", "Idempotency-Key": randomUUID() };
 
+    // 1) cria order
     const create = await axios.post("https://api.pagar.me/core/v5/orders", payload, { headers, timeout: 30000 });
     let order = create.data; let charge = order.charges?.[0]; let tx = charge?.last_transaction || {};
 
     console.log("🧾 Order:", order.id, "| método:", method);
 
-    if (method === "pix" || method === "boleto") { const result = await waitChargeReady(order.id, method); order = result.order; charge = result.charge; tx = result.tx || {}; }
+    // 2) polling (pix/boleto)
+    if (method === "pix" || method === "boleto") {
+      const result = await waitChargeReady(order.id, method);
+      order = result.order; charge = result.charge; tx = result.tx || {};
+    }
 
+    // 3) tenta obter QR base64 se vier só URL
     let qrCodeBase64 = tx?.qr_code_base64 || null;
     if (method === "pix" && !qrCodeBase64 && tx?.qr_code_url) {
       try {
@@ -225,7 +315,10 @@ app.post("/pay", async (req, res) => {
       } catch (e) { console.warn("⚠️ Falha ao baixar QR base64:", e?.response?.status || e.message); }
     }
 
-    const out = { success: true, data: { order_id: order.id, status: order.status, charge_status: charge?.status || null, charge_id: charge?.id || null, transaction_id: tx?.id || null } };
+    const out = {
+      success: true,
+      data: { order_id: order.id, status: order.status, charge_status: charge?.status || null, charge_id: charge?.id || null, transaction_id: tx?.id || null }
+    };
     if (method === "pix") out.pix = { qr_code: tx.qr_code || tx.qr_code_text || tx.emv || null, qr_code_url: tx.qr_code_url || tx.image_url || null, qr_code_base64: qrCodeBase64 || tx.qr_code_base64 || null, status: tx.status || charge?.status || order.status || null };
     if (method === "boleto") out.boleto = { url: tx?.url || tx?.pdf?.url || tx?.pdf_url || charge?.url || charge?.pdf?.url || null, line: tx?.line || tx?.line_code || charge?.line || charge?.line_code || null, status: tx?.status || charge?.status || order?.status || null };
     if (method === "card") out.card = { status: tx?.status || charge?.status || order?.status || null, acquirer_message: tx?.acquirer_message || null, acquirer_tid: tx?.acquirer_tid || null, code: tx?.gateway_response?.code || null, reason: tx?.gateway_response?.errors?.[0]?.message || null };
@@ -245,11 +338,8 @@ app.post("/pay", async (req, res) => {
 app.post("/webhook", express.json({ type: "*/*" }), async (req, res) => {
   try {
     const result = await createShopifyPaidOrderFromPagarmePayload(req.body || {});
-    if (result.created) {
-      console.log("✅ Pedido criado na Shopify:", result.shopify_order_id);
-    } else {
-      console.log("Webhook recebido, ainda não pago.");
-    }
+    if (result.created) console.log("✅ Pedido criado na Shopify:", result.shopify_order_id);
+    else console.log("Webhook recebido, ainda não pago.");
     return res.sendStatus(200); // evita retries agressivos
   } catch (e) {
     console.error("webhook->shopify error:", e?.response?.data || e.message);
@@ -297,25 +387,19 @@ app.post("/confirm", express.json(), async (req, res) => {
     const status = (tx?.status || charge?.status || order?.status || "").toLowerCase();
 
     const paid = ["paid","succeeded","captured","approved"].includes(status);
-    if (!paid) {
-      return res.status(200).json({ ok:true, paid:false, status });
-    }
+    if (!paid) return res.status(200).json({ ok:true, paid:false, status });
 
     // Reaproveita a função como se fosse webhook
     const payload = {
       id: order.id,
       status: order.status,
       charges: [ { ...charge, last_transaction: tx } ],
-      customer: order.customer || {}
+      customer: order.customer || {},
+      shipping: order.shipping || undefined
     };
 
     const result = await createShopifyPaidOrderFromPagarmePayload(payload);
-    return res.status(200).json({
-      ok:true,
-      paid:true,
-      created: result.created,
-      shopify_order_id: result.shopify_order_id || null
-    });
+    return res.status(200).json({ ok:true, paid:true, created: result.created, shopify_order_id: result.shopify_order_id || null });
   } catch (e) {
     console.error("/confirm error:", e?.response?.data || e.message);
     return res.status(500).json({ ok:false, error: e.message || "Falha no confirm" });
@@ -324,7 +408,6 @@ app.post("/confirm", express.json(), async (req, res) => {
 
 /* =========================
    Fallback SPA — depois de TODAS as APIs
-   (não intercepta /api, /pay, /webhook, /order, /refund, /confirm)
    ========================= */
 app.get(/^\/(?!api\/|pay$|webhook$|order\/|refund$|confirm$).*/, (_req, res) => {
   res.sendFile(path.join(PUB, "index.html"));
