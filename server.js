@@ -69,6 +69,15 @@ async function waitChargeReady(orderId, kind){
 const PUB = path.join(__dirname, "public"); // <— robusto
 app.use(express.static(PUB));
 app.get(["/", "/checkout"], (_req, res) => res.sendFile(path.join(PUB, "index.html")));
+// 1) Rotas explícitas do UI
+app.get(["/", "/checkout"], (_req, res) => {
+  res.sendFile(path.join(PUB, "index.html"));
+});
+
+// 2) Fallback SPA: qualquer rota que NÃO comece com /api
+app.get(/^\/(?!api\/).*/, (_req, res) => {
+  res.sendFile(path.join(PUB, "index.html"));
+});
 
 // (debug opcional)
 // app.use((req, _res, next) => { console.log("➡️", req.method, req.path); next(); });
