@@ -6,7 +6,7 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const compression = require("compression");
 const morgan = require("morgan");
-const { randomUUID } = require("crypto");
+const { randomUUID, createHmac } = require("crypto");
 const path = require("path");
 require("dotenv").config();
 
@@ -23,7 +23,35 @@ const PROXY_PREFIX  = process.env.APP_PROXY_PREFIX  || "apps/cobrax";
 const PROXY_SUBPATH = process.env.APP_PROXY_SUBPATH || "checkout";
 const CHECKOUT_BASE = process.env.CHECKOUT_BASE_URL || "https://checkout.pagueleve.com";
 
-// Helpers / Admin API
+/* =========================
+   Webhook signing (opcional)
+   Se a Pagar.me fornecer segredo + header, preencha:
+   - PAGARME_WEBHOOK_SECRET
+   - PAGARME_WEBHOOK_HEADER (ex.: "x-hub-signature" ou "x-pagarme-signature")
+   - PAGARME_WEBHOOK_ALGO   (ex.: "sha256")
+   ========================= */
+const WH_SECRET = process.env.PAGARME_WEBHOOK_SECRET || "";
+const WH_HEADER = (process.env.PAGARME_WEBHOOK_HEADER || "").toLowerCase();
+const WH_ALGO   = (process.env.PAGARME_WEBHOOK_ALGO || "sha256").toLowerCase();
+
+// Captura raw body SÓ para /webhook (precisa p/ assinatura)
+app.use("/webhook", express.raw({ type: "*/*" }));
+// Demais rotas em JSON
+app.use((req, res, next) => {
+  if (req.path === "/webhook") return next();
+  express.json({ limit: "1mb", type: "*/*" })(req, res, next);
+});
+app.use(express.urlencoded({ extended: true }));
+
+// -------- middlewares base --------
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(compression());
+app.use(morgan("combined"));
+// Deixa aberto por enquanto; dá pra restringir depois
+app.use(cors());
+app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
+
+// ---------- helpers ----------
 async function shopifyAdmin(pathApi, method = "GET", body = null, extraHeaders = {}) {
   const url = `https://${SHOP_DOMAIN}/admin/api/${SHOP_VERSION}/${pathApi}`;
   const headers = { "X-Shopify-Access-Token": SHOP_TOKEN, "Content-Type": "application/json", ...extraHeaders };
@@ -31,17 +59,6 @@ async function shopifyAdmin(pathApi, method = "GET", body = null, extraHeaders =
   if (body) opts.data = body;
   return axios({ url, ...opts });
 }
-
-// -------- middlewares base --------
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(compression());
-app.use(morgan("combined"));
-app.use(cors()); // mantém liberado por enquanto (produção: podemos restringir)
-app.use(express.json({ limit: "1mb", type: "*/*" }));
-app.use(express.urlencoded({ extended: true }));
-app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
-
-// ---------- helpers ----------
 const onlyDigits = (s) => (s ? String(s).replace(/\D/g, "") : "");
 function brlToCents(v) {
   if (v == null) return 0;
@@ -49,13 +66,25 @@ function brlToCents(v) {
   const n = Number(String(v).replace(/\./g, "").replace(",", "."));
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
 }
-function authHeader() { const key = process.env.PAGARME_API_KEY || ""; return "Basic " + Buffer.from(`${key}:`).toString("base64"); }
-function clientIp(req) { return (req.headers["x-forwarded-for"] || req.ip || req.socket.remoteAddress || "").toString().split(",")[0].trim(); }
+function authHeader() {
+  const key = process.env.PAGARME_API_KEY || "";
+  return "Basic " + Buffer.from(`${key}:`).toString("base64");
+}
+function clientIp(req) {
+  return (req.headers["x-forwarded-for"] || req.ip || req.socket.remoteAddress || "")
+    .toString()
+    .split(",")[0]
+    .trim();
+}
 async function fetchOrder(orderId) {
-  const resp = await axios.get(`https://api.pagar.me/core/v5/orders/${orderId}`, { headers: { Authorization: authHeader() }, timeout: 15000 });
+  const resp = await axios.get(`https://api.pagar.me/core/v5/orders/${orderId}`, {
+    headers: { Authorization: authHeader() },
+    timeout: 15000,
+  });
   return resp.data;
 }
-const hasPixFields = (tx) => !!(tx?.qr_code || tx?.qr_code_text || tx?.emv || tx?.qr_code_url || tx?.image_url || tx?.qr_code_base64);
+const hasPixFields = (tx) =>
+  !!(tx?.qr_code || tx?.qr_code_text || tx?.emv || tx?.qr_code_url || tx?.image_url || tx?.qr_code_base64);
 function hasBoletoFields(tx, charge) {
   const url  = tx?.url || tx?.pdf?.url || tx?.pdf_url || charge?.url || charge?.pdf?.url || null;
   const line = tx?.line || tx?.line_code || charge?.line || charge?.line_code || null;
@@ -79,7 +108,7 @@ async function waitChargeReady(orderId, kind){
 }
 
 /* =========================
-   UI (SPA) — serve o mesmo HTML em "/" e "/checkout"
+   UI (SPA)
    ========================= */
 const PUB = path.join(__dirname, "public");
 app.use(express.static(PUB));
@@ -138,12 +167,13 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
   const noteAttrs = [];
   const orderId = body?.id || body?.order?.id || body?.data?.id;
   const txId    = tx?.id;
+  const statusTag = status || "";
   if (orderId)    noteAttrs.push({ name: "pagarme_order_id", value: String(orderId) });
   if (charge?.id) noteAttrs.push({ name: "pagarme_charge_id", value: String(charge.id) });
   if (txId)       noteAttrs.push({ name: "pagarme_tx_id", value: String(txId) });
-  if (status)     noteAttrs.push({ name: "pagarme_status", value: status });
+  if (statusTag)  noteAttrs.push({ name: "pagarme_status", value: statusTag });
 
-  // endereço de entrega (se veio no payload da Pagar.me)
+  // endereço de entrega (se vier no payload)
   const shipping_address = body?.shipping ? {
     first_name: buyerName,
     address1: body.shipping.address?.line_1 || '',
@@ -184,7 +214,8 @@ app.get("/api/checkout-start", (req, res) => {
   const cart_id = String(req.query.cart_id || "").trim();
   const total_raw = String(req.query.total_cents || "").trim();
   const total_cents = Number.parseInt(total_raw, 10);
-  if (!cart_id || Number.isNaN(total_cents)) return res.status(400).json({ ok: false, error: "Missing params", got: { cart_id, total_raw } });
+  if (!cart_id || Number.isNaN(total_cents))
+    return res.status(400).json({ ok: false, error: "Missing params", got: { cart_id, total_raw } });
   return res.status(200).json({ ok: true, step: "checkout:start", cart_id, total_cents });
 });
 
@@ -193,15 +224,16 @@ app.get("/api/checkout-start", (req, res) => {
    ========================= */
 app.post("/pay", async (req, res) => {
   try {
-    if (!process.env.PAGARME_API_KEY) return res.status(500).json({ success: false, error: "PAGARME_API_KEY ausente no .env" });
+    if (!process.env.PAGARME_API_KEY)
+      return res.status(500).json({ success: false, error: "PAGARME_API_KEY ausente no .env" });
 
     const {
       name, email, cpf, phone,
       method,               // "pix" | "boleto" | "card"
       amountBRL,
       card_number, exp_month, exp_year, cvv,
-      installments,         // NOVO
-      address               // NOVO { cep, address1, number, complement, neighborhood, city, state }
+      installments,         // nº parcelas
+      address               // { cep, address1, number, complement, neighborhood, city, state }
     } = req.body || {};
 
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
@@ -212,15 +244,18 @@ app.post("/pay", async (req, res) => {
     if (cpfDigits.length !== 11) return res.status(400).json({ success: false, error: "CPF inválido. Use 11 dígitos." });
 
     const phoneDigits = onlyDigits(phone || "");
-    if (phoneDigits.length < 10 || phoneDigits.length > 11) return res.status(400).json({ success: false, error: "Celular inválido. Use DDD + número (10 ou 11 dígitos)." });
-    const area_code = phoneDigits.slice(0, 2); const phoneNumber = phoneDigits.slice(2);
+    if (phoneDigits.length < 10 || phoneDigits.length > 11)
+      return res.status(400).json({ success: false, error: "Celular inválido. Use DDD + número (10 ou 11 dígitos)." });
+    const area_code = phoneDigits.slice(0, 2);
+    const phoneNumber = phoneDigits.slice(2);
 
     const cepDigits = onlyDigits(address?.cep || "");
     if (address && cepDigits && cepDigits.length !== 8) {
       return res.status(400).json({ success:false, error:"CEP inválido (8 dígitos)." });
     }
 
-    const ip = clientIp(req); const ua = req.headers["user-agent"] || "";
+    const ip = clientIp(req);
+    const ua = req.headers["user-agent"] || "";
 
     const customer = {
       name,
@@ -234,34 +269,37 @@ app.post("/pay", async (req, res) => {
     };
 
     const billing_address = {
-  line_1: `${address?.address1 || 'Endereco'}${address?.number ? ', ' + address.number : ''}`,
-  line_2: address?.complement || '',
-  zip_code: cepDigits || '00000000',
-  neighborhood: address?.neighborhood || 'Centro',
-  city: address?.city || 'Sao Paulo',
-  state: address?.state || 'SP',
-  country: "BR"
-};
+      line_1: `${address?.address1 || ''}${address?.number ? ', ' + address.number : ''}`.trim(),
+      line_2: address?.complement || '',
+      zip_code: cepDigits || '00000000',
+      neighborhood: address?.neighborhood || '',
+      city: address?.city || '',
+      state: address?.state || '',
+      country: "BR"
+    };
 
-
-    // shipping completo — Pagar.me v5 exige "description"
-const shipping = {
-  name,                                   // nome do recebedor
-  description: "Entrega padrão",          // <-- CAMPO OBRIGATÓRIO
-  fee: 0,                                 // centavos (0 se frete grátis)
-  address: {
-    line_1: billing_address.line_1 || "Endereço não informado",
-    line_2: billing_address.line_2 || "",
-    zip_code: billing_address.zip_code || "00000000",
-    city: billing_address.city || "Sao Paulo",
-    state: billing_address.state || "SP",
-    country: "BR"
-  }
-};
-
+    // IMPORTANTE: descrição exigida pelo v5 (evita 422 'order.shipping.description')
+    const shipping = {
+      name,
+      description: "Entrega padrão",
+      fee: 0,
+      address: {
+        line_1: billing_address.line_1,
+        zip_code: billing_address.zip_code,
+        city: billing_address.city,
+        state: billing_address.state,
+        country: "BR"
+      }
+    };
 
     // item simples
-    const items = [{ code: "SKU-COBRAX-001", name: "Pedido Cobrax", description: "Checkout Cobrax", quantity: 1, amount }];
+    const items = [{
+      code: "SKU-COBRAX-001",
+      name: "Pedido Cobrax",
+      description: "Checkout Cobrax",
+      quantity: 1,
+      amount
+    }];
 
     let payments = [];
     if (method === "pix") {
@@ -270,9 +308,8 @@ const shipping = {
       const due = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
       payments = [{ payment_method: "boleto", boleto: { due_at: due, instructions: "Pague até o vencimento." }, metadata: { ua, ip } }];
     } else if (method === "card") {
-      if (!card_number || !exp_month || !exp_year || !cvv) {
+      if (!card_number || !exp_month || !exp_year || !cvv)
         return res.status(400).json({ success: false, error: "Dados do cartão incompletos." });
-      }
       const cardInstallments = Math.max(1, Number(installments || 1));
       payments = [{
         payment_method: "credit_card",
@@ -299,19 +336,21 @@ const shipping = {
     const payload = { customer, items, payments, closed: true, shipping };
     const headers = { Authorization: authHeader(), "Content-Type": "application/json", "Idempotency-Key": randomUUID() };
 
-    // 1) cria order
+    // cria order
     const create = await axios.post("https://api.pagar.me/core/v5/orders", payload, { headers, timeout: 30000 });
-    let order = create.data; let charge = order.charges?.[0]; let tx = charge?.last_transaction || {};
+    let order = create.data;
+    let charge = order.charges?.[0];
+    let tx = charge?.last_transaction || {};
 
     console.log("🧾 Order:", order.id, "| método:", method);
 
-    // 2) polling (pix/boleto)
+    // polling (pix/boleto)
     if (method === "pix" || method === "boleto") {
       const result = await waitChargeReady(order.id, method);
       order = result.order; charge = result.charge; tx = result.tx || {};
     }
 
-    // 3) tenta obter QR base64 se vier só URL
+    // tenta obter QR base64 se vier só URL
     let qrCodeBase64 = tx?.qr_code_base64 || null;
     if (method === "pix" && !qrCodeBase64 && tx?.qr_code_url) {
       try {
@@ -340,12 +379,36 @@ const shipping = {
 /* =========================
    WEBHOOK Pagar.me -> cria pedido na Shopify quando pago
    ========================= */
-app.post("/webhook", express.json({ type: "*/*" }), async (req, res) => {
+function verifyWebhook(req) {
+  if (!WH_SECRET || !WH_HEADER) return true; // verificação desativada
   try {
-    const result = await createShopifyPaidOrderFromPagarmePayload(req.body || {});
+    const headerVal = (req.headers[WH_HEADER] || "").toString();
+    if (!headerVal) return false;
+    const raw = req.body instanceof Buffer ? req.body : Buffer.from(req.body || "");
+    const hmac = createHmac(WH_ALGO, WH_SECRET).update(raw).digest("hex");
+    // formatos possíveis: "sha256=abcdef..." ou só "abcdef..."
+    const token = headerVal.includes("=") ? headerVal.split("=").pop() : headerVal;
+    return token && hmac && token.trim().toLowerCase() === hmac.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+app.post("/webhook", async (req, res) => {
+  try {
+    if (!verifyWebhook(req)) {
+      console.warn("⚠️ Assinatura de webhook inválida");
+      return res.sendStatus(200); // responde 200 pra não gerar retries infinitos
+    }
+    const json = (() => {
+      try { return JSON.parse(req.body.toString("utf8") || "{}"); }
+      catch { return {}; }
+    })();
+
+    const result = await createShopifyPaidOrderFromPagarmePayload(json);
     if (result.created) console.log("✅ Pedido criado na Shopify:", result.shopify_order_id);
     else console.log("Webhook recebido, ainda não pago.");
-    return res.sendStatus(200); // evita retries agressivos
+    return res.sendStatus(200);
   } catch (e) {
     console.error("webhook->shopify error:", e?.response?.data || e.message);
     return res.sendStatus(200);
@@ -394,15 +457,7 @@ app.post("/confirm", express.json(), async (req, res) => {
     const paid = ["paid","succeeded","captured","approved"].includes(status);
     if (!paid) return res.status(200).json({ ok:true, paid:false, status });
 
-    // Reaproveita a função como se fosse webhook
-    const payload = {
-      id: order.id,
-      status: order.status,
-      charges: [ { ...charge, last_transaction: tx } ],
-      customer: order.customer || {},
-      shipping: order.shipping || undefined
-    };
-
+    const payload = { id: order.id, status: order.status, charges: [ { ...charge, last_transaction: tx } ], customer: order.customer || {}, shipping: order.shipping || undefined };
     const result = await createShopifyPaidOrderFromPagarmePayload(payload);
     return res.status(200).json({ ok:true, paid:true, created: result.created, shopify_order_id: result.shopify_order_id || null });
   } catch (e) {
