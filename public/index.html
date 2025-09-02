@@ -10,6 +10,10 @@
   <form id="checkout-form" class="bg-white p-8 rounded shadow-md w-full max-w-md space-y-4" autocomplete="off">
     <h2 class="text-2xl font-bold text-center">Cobrax Checkout</h2>
 
+    <!-- hidden para transportar dados do carrinho vindos da Shopify -->
+    <input id="cart_id" name="cart_id" type="hidden" />
+    <input id="total_cents" name="total_cents" type="hidden" />
+
     <input id="name" type="text" placeholder="Nome completo" required class="w-full px-4 py-2 border rounded"/>
     <input id="email" type="email" placeholder="E-mail" required class="w-full px-4 py-2 border rounded"/>
     <input id="cpf" type="text" inputmode="numeric" placeholder="CPF (somente números)" required class="w-full px-4 py-2 border rounded"/>
@@ -51,6 +55,42 @@
     const extraEl  = document.getElementById('extra');
     const cardBox  = document.getElementById('card-fields');
     const btn      = document.getElementById('pay-btn');
+
+    /* ========= PREFILL SEGURO: cart_id & total_cents =========
+       - Lê ?cart_id=&total_cents= da URL
+       - Grava em inputs hidden
+       - Converte total_cents -> amount (R$) e trava o campo (readOnly)
+       - Se não vierem, o formulário continua usável manualmente
+    */
+    (function securePrefillFromCart() {
+      const qs = new URLSearchParams(location.search);
+      const cartId = qs.get('cart_id') || '';
+      const totalRaw = qs.get('total_cents');
+      const totalCents = totalRaw !== null ? parseInt(totalRaw, 10) : NaN;
+
+      const cartHidden  = document.getElementById('cart_id');
+      const totalHidden = document.getElementById('total_cents');
+      const amountEl    = document.getElementById('amount');
+
+      if (cartHidden && cartId) cartHidden.value = cartId;
+      if (totalHidden && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
+
+      if (amountEl && !Number.isNaN(totalCents)) {
+        // centavos → reais (vírgula)
+        amountEl.value = (totalCents / 100).toFixed(2).replace('.', ',');
+        amountEl.readOnly = true;                    // trava edição
+        amountEl.classList.add('bg-gray-50');        // feedback visual
+        amountEl.title = 'Valor definido pelo carrinho da loja';
+      }
+
+      // segurança extra no submit: garante hidden preenchidos
+      form.addEventListener('submit', function (e) {
+        if (cartHidden && !cartHidden.value) cartHidden.value = cartId || '';
+        if (totalHidden && !totalHidden.value && !Number.isNaN(totalCents)) {
+          totalHidden.value = String(totalCents);
+        }
+      });
+    })();
 
     // --------- helpers UI/UX ----------
     function parseAmountBRL(v) {
@@ -150,6 +190,11 @@
         phone: document.getElementById('phone').value.replace(/\D/g,''),
         method: document.querySelector('input[name="pmethod"]:checked').value,
         amountBRL: parseAmountBRL(document.getElementById('amount').value),
+
+        // enviados apenas para rastreio/concília; o backend pode ignorar
+        cart_id: document.getElementById('cart_id').value || null,
+        total_cents: document.getElementById('total_cents').value || null,
+
         card_number: (document.getElementById('card_number')?.value || '').replace(/\D/g,''),
         exp_month: Number(document.getElementById('exp_month')?.value || 0),
         exp_year:  Number(document.getElementById('exp_year')?.value || 0),
@@ -180,14 +225,17 @@
       }
     });
 
-    // Prefill via querystring (?name=&email=&cpf=&phone=&amount=&method=)
+    // Prefill extra opcional (mantive, mas NÃO sobrescreve o valor travado)
     (function prefillFromQS() {
       const p = new URLSearchParams(location.search);
       if (p.has('name'))  document.getElementById('name').value = p.get('name');
       if (p.has('email')) document.getElementById('email').value = p.get('email');
       if (p.has('cpf'))   document.getElementById('cpf').value = p.get('cpf');
       if (p.has('phone')) document.getElementById('phone').value = p.get('phone');
-      if (p.has('amount')) document.getElementById('amount').value = p.get('amount');
+      if (p.has('amount')) {
+        const amt = document.getElementById('amount');
+        if (!amt.readOnly) amt.value = p.get('amount'); // respeita lock via total_cents
+      }
       if (p.has('method')) {
         const m = p.get('method');
         const radio = document.querySelector(`input[name="pmethod"][value="${m}"]`);
