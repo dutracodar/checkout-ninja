@@ -66,24 +66,12 @@ async function waitChargeReady(orderId, kind){
 /* =========================
    UI (SPA) — serve o mesmo HTML em "/" e "/checkout"
    ========================= */
-const PUB = path.join(__dirname, "public"); // <— robusto
+const PUB = path.join(__dirname, "public");
 app.use(express.static(PUB));
 app.get(["/", "/checkout"], (_req, res) => res.sendFile(path.join(PUB, "index.html")));
-// 1) Rotas explícitas do UI
-app.get(["/", "/checkout"], (_req, res) => {
-  res.sendFile(path.join(PUB, "index.html"));
-});
-
-// 2) Fallback SPA: qualquer rota que NÃO comece com /api
-app.get(/^\/(?!api\/).*/, (_req, res) => {
-  res.sendFile(path.join(PUB, "index.html"));
-});
-
-// (debug opcional)
-// app.use((req, _res, next) => { console.log("➡️", req.method, req.path); next(); });
 
 /* =========================
-   App Proxy -> redireciona pro Cobrax
+   App Proxy -> redireciona pro Cobrax (quando usar proxy oficial)
    ========================= */
 app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
   try {
@@ -95,6 +83,70 @@ app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
     return res.status(500).send("Proxy error");
   }
 });
+
+/* =========================
+   Shopify order creation helper (reuso no webhook e /confirm)
+   ========================= */
+async function createShopifyPaidOrderFromPagarmePayload(body) {
+  const charges = body?.charges || body?.data?.charges || [];
+  const charge  = charges[0] || body?.charge || {};
+  const tx      = charge?.last_transaction || {};
+  const status  = (tx?.status || charge?.status || body?.status || "").toLowerCase();
+  const isPaid = ["paid", "succeeded", "captured", "approved"].includes(status);
+  if (!isPaid) return { created: false, reason: "not_paid" };
+
+  const amountCents = Number(charge?.amount || body?.amount || 0);
+  const amountBRL   = (amountCents / 100).toFixed(2);
+  const buyerEmail  = body?.customer?.email || body?.customer?.address?.email || "cliente@exemplo.com";
+  const buyerName   = body?.customer?.name  || "Cliente Cobrax";
+
+  // Tenta ler itens do metadata
+  let metaItemsRaw = charge?.metadata?.items ?? body?.metadata?.items ?? body?.items;
+  let parsedItems = [];
+  try {
+    if (Array.isArray(metaItemsRaw)) parsedItems = metaItemsRaw;
+    else if (typeof metaItemsRaw === "string") parsedItems = JSON.parse(metaItemsRaw);
+  } catch {}
+
+  // Fallback 1 item
+  let lineItems = [{ title: "Pedido Cobrax", quantity: 1, price: amountBRL }];
+
+  if (parsedItems.length > 0) {
+    lineItems = parsedItems.map(it => ({
+      title: it.title || it.sku || "Item",
+      quantity: Number(it.qty || it.quantity || 1),
+      price: ((Number(it.price_cents ?? 0)) / 100).toFixed(2),
+      sku: it.sku || undefined,
+    }));
+  }
+
+  const noteAttrs = [];
+  const orderId = body?.id || body?.order?.id || body?.data?.id;
+  const txId    = tx?.id;
+  if (orderId)    noteAttrs.push({ name: "pagarme_order_id", value: String(orderId) });
+  if (charge?.id) noteAttrs.push({ name: "pagarme_charge_id", value: String(charge.id) });
+  if (txId)       noteAttrs.push({ name: "pagarme_tx_id", value: String(txId) });
+  if (status)     noteAttrs.push({ name: "pagarme_status", value: status });
+
+  const shopifyOrder = {
+    order: {
+      email: buyerEmail,
+      send_receipt: false,
+      send_fulfillment_receipt: false,
+      financial_status: "paid",
+      currency: "BRL",
+      note: `Pagar.me order ${orderId} / charge ${charge?.id || ""}`,
+      note_attributes: noteAttrs,
+      line_items: lineItems,
+      customer: { first_name: buyerName, email: buyerEmail },
+      tags: "cobrax,pagarme",
+    },
+  };
+
+  const idem = `pagarme-${orderId}-${charge?.id || "nocharge"}`;
+  const r = await shopifyAdmin("orders.json", "POST", shopifyOrder, { "Idempotency-Key": idem });
+  return { created: true, shopify_order_id: r.data?.order?.id || null };
+}
 
 /* =========================
    API — inicia o fluxo (substitui teste antigo de GET /checkout)
@@ -192,47 +244,13 @@ app.post("/pay", async (req, res) => {
    ========================= */
 app.post("/webhook", express.json({ type: "*/*" }), async (req, res) => {
   try {
-    const body   = req.body || {};
-    const orderId = body?.id || body?.order?.id || body?.data?.id;
-    const charges = body?.charges || body?.data?.charges || [];
-    const charge  = charges[0] || body?.charge || {};
-    const tx      = charge?.last_transaction || {};
-    const status  = (tx?.status || charge?.status || body?.status || "").toLowerCase();
-    const isPaid = ["paid", "succeeded", "captured", "approved"].includes(status);
-
-    if (!isPaid) { console.log("Webhook recebido, não pago ainda:", status, "| order:", orderId); return res.sendStatus(200); }
-
-    const amountCents = Number(charge?.amount || body?.amount || 0);
-    const amountBRL   = (amountCents / 100).toFixed(2);
-    const buyerEmail  = body?.customer?.email || body?.customer?.address?.email || "cliente@exemplo.com";
-    const buyerName   = body?.customer?.name  || "Cliente Cobrax";
-
-    let metaItemsRaw = charge?.metadata?.items ?? body?.metadata?.items ?? body?.items;
-    let parsedItems = [];
-    try { if (Array.isArray(metaItemsRaw)) parsedItems = metaItemsRaw; else if (typeof metaItemsRaw === "string") parsedItems = JSON.parse(metaItemsRaw); } catch { parsedItems = []; }
-
-    let lineItems = [{ title: "Pedido Cobrax", quantity: 1, price: amountBRL }];
-    if (parsedItems.length > 0) {
-      lineItems = parsedItems.map(it => ({ title: it.title || it.sku || "Item", quantity: Number(it.qty || it.quantity || 1), price: ((Number(it.price_cents ?? 0)) / 100).toFixed(2), sku: it.sku || undefined }));
+    const result = await createShopifyPaidOrderFromPagarmePayload(req.body || {});
+    if (result.created) {
+      console.log("✅ Pedido criado na Shopify:", result.shopify_order_id);
+    } else {
+      console.log("Webhook recebido, ainda não pago.");
     }
-
-    const noteAttrs = [];
-    if (orderId)    noteAttrs.push({ name: "pagarme_order_id", value: String(orderId) });
-    if (charge?.id) noteAttrs.push({ name: "pagarme_charge_id", value: String(charge.id) });
-    if (tx?.id)     noteAttrs.push({ name: "pagarme_tx_id", value: String(tx.id) });
-    if (status)     noteAttrs.push({ name: "pagarme_status", value: status });
-
-    const shopifyOrder = { order: {
-      email: buyerEmail, send_receipt: false, send_fulfillment_receipt: false, financial_status: "paid", currency: "BRL",
-      note: `Pagar.me order ${orderId} / charge ${charge?.id || ""}`, note_attributes: noteAttrs,
-      line_items: lineItems, customer: { first_name: buyerName, email: buyerEmail }, tags: "cobrax,pagarme",
-    }};
-
-    const idem = `pagarme-${orderId}-${charge?.id || "nocharge"}`;
-    const r = await shopifyAdmin("orders.json", "POST", shopifyOrder, { "Idempotency-Key": idem });
-
-    console.log("✅ Pedido criado na Shopify:", r.data?.order?.id, "| itens:", lineItems.length);
-    return res.sendStatus(200);
+    return res.sendStatus(200); // evita retries agressivos
   } catch (e) {
     console.error("webhook->shopify error:", e?.response?.data || e.message);
     return res.sendStatus(200);
@@ -263,6 +281,53 @@ app.post("/refund", async (req, res) => {
   } catch (e) {
     res.status(e.response?.status || 500).json({ success: false, error: e.response?.data?.message || e.message });
   }
+});
+
+/* =========================
+   Plano B: confirmar manualmente quando status virar "paid"
+   ========================= */
+app.post("/confirm", express.json(), async (req, res) => {
+  try {
+    const { order_id } = req.body || {};
+    if (!order_id) return res.status(400).json({ ok:false, error:"order_id é obrigatório" });
+
+    const order = await fetchOrder(order_id);
+    const charge = order.charges?.[0];
+    const tx = charge?.last_transaction || {};
+    const status = (tx?.status || charge?.status || order?.status || "").toLowerCase();
+
+    const paid = ["paid","succeeded","captured","approved"].includes(status);
+    if (!paid) {
+      return res.status(200).json({ ok:true, paid:false, status });
+    }
+
+    // Reaproveita a função como se fosse webhook
+    const payload = {
+      id: order.id,
+      status: order.status,
+      charges: [ { ...charge, last_transaction: tx } ],
+      customer: order.customer || {}
+    };
+
+    const result = await createShopifyPaidOrderFromPagarmePayload(payload);
+    return res.status(200).json({
+      ok:true,
+      paid:true,
+      created: result.created,
+      shopify_order_id: result.shopify_order_id || null
+    });
+  } catch (e) {
+    console.error("/confirm error:", e?.response?.data || e.message);
+    return res.status(500).json({ ok:false, error: e.message || "Falha no confirm" });
+  }
+});
+
+/* =========================
+   Fallback SPA — depois de TODAS as APIs
+   (não intercepta /api, /pay, /webhook, /order, /refund, /confirm)
+   ========================= */
+app.get(/^\/(?!api\/|pay$|webhook$|order\/|refund$|confirm$).*/, (_req, res) => {
+  res.sendFile(path.join(PUB, "index.html"));
 });
 
 // 404 apenas para APIs (não quebra SPA/UI)
