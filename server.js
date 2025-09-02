@@ -234,26 +234,31 @@ app.post("/pay", async (req, res) => {
     };
 
     const billing_address = {
-      line_1: `${address?.address1 || ''}${address?.number ? ', ' + address.number : ''}`.trim(),
-      line_2: address?.complement || '',
-      zip_code: cepDigits || '00000000',
-      neighborhood: address?.neighborhood || '',
-      city: address?.city || '',
-      state: address?.state || '',
-      country: "BR"
-    };
+  line_1: `${address?.address1 || 'Endereco'}${address?.number ? ', ' + address.number : ''}`,
+  line_2: address?.complement || '',
+  zip_code: cepDigits || '00000000',
+  neighborhood: address?.neighborhood || 'Centro',
+  city: address?.city || 'Sao Paulo',
+  state: address?.state || 'SP',
+  country: "BR"
+};
 
-    const shipping = {
-      name,
-      address: {
-        line_1: billing_address.line_1,
-        zip_code: billing_address.zip_code,
-        city: billing_address.city,
-        state: billing_address.state,
-        country: "BR"
-      },
-      fee: 0
-    };
+
+    // shipping completo — Pagar.me v5 exige "description"
+const shipping = {
+  name,                                   // nome do recebedor
+  description: "Entrega padrão",          // <-- CAMPO OBRIGATÓRIO
+  fee: 0,                                 // centavos (0 se frete grátis)
+  address: {
+    line_1: billing_address.line_1 || "Endereço não informado",
+    line_2: billing_address.line_2 || "",
+    zip_code: billing_address.zip_code || "00000000",
+    city: billing_address.city || "Sao Paulo",
+    state: billing_address.state || "SP",
+    country: "BR"
+  }
+};
+
 
     // item simples
     const items = [{ code: "SKU-COBRAX-001", name: "Pedido Cobrax", description: "Checkout Cobrax", quantity: 1, amount }];
