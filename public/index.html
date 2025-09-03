@@ -3,130 +3,158 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Cobrax Checkout</title>
+  <title>Pague Leve — Checkout</title>
   <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Meta Pixel (troque PIXEL_ID pelo seu) -->
+  <script>
+  !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+  n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;
+  n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;
+  t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,
+  document,'script','https://connect.facebook.net/en_US/fbevents.js');
+  fbq('init','PIXEL_ID');
+  fbq('track','PageView');
+  </script>
+  <noscript>
+    <img height="1" width="1" style="display:none"
+      src="https://www.facebook.com/tr?id=PIXEL_ID&ev=PageView&noscript=1"/>
+  </noscript>
 </head>
-<body class="bg-gray-100 flex items-center justify-center min-h-screen">
-  <form id="checkout-form" class="bg-white p-8 rounded shadow-md w-full max-w-md space-y-4" autocomplete="off">
-    <h2 class="text-2xl font-bold text-center">Cobrax Checkout</h2>
 
-    <!-- hidden do carrinho -->
-    <input id="cart_id" name="cart_id" type="hidden" />
-    <input id="total_cents" name="total_cents" type="hidden" />
-
-    <!-- DADOS PESSOAIS -->
-    <input id="name" type="text" placeholder="Nome completo" required class="w-full px-4 py-2 border rounded"/>
-    <input id="email" type="email" placeholder="E-mail" required class="w-full px-4 py-2 border rounded"/>
-    <input id="cpf" type="text" inputmode="numeric" placeholder="CPF (somente números)" required class="w-full px-4 py-2 border rounded"/>
-    <input id="phone" type="text" inputmode="numeric" placeholder="Celular (DDD+número)" required class="w-full px-4 py-2 border rounded"/>
-
-    <!-- VALOR -->
-    <div>
-      <label class="block text-sm font-medium text-gray-700 mb-1">Valor (R$)</label>
-      <input id="amount" type="text" value="10,00" placeholder="Ex.: 655,00 ou 655.00" required class="w-full px-4 py-2 border rounded"/>
-    </div>
-
-    <!-- CUPOM -->
-<div class="space-y-2">
-  <label class="font-semibold block">Cupom de desconto</label>
-  <div class="flex gap-2">
-    <input id="coupon" type="text" placeholder="Digite seu cupom" class="flex-1 px-4 py-2 border rounded uppercase"/>
-    <button id="apply-coupon" type="button" class="px-4 bg-gray-900 text-white rounded hover:opacity-90">
-      Aplicar
-    </button>
-  </div>
-  <div id="coupon-msg" class="text-sm"></div>
-</div>
-
-
-    <!-- ENDEREÇO DE ENTREGA -->
-    <div class="space-y-2">
-      <div class="font-semibold">Endereço de entrega</div>
-      <div class="grid grid-cols-3 gap-2">
-        <input id="cep" class="col-span-1 px-4 py-2 border rounded" inputmode="numeric" placeholder="CEP (00000-000)" required />
-        <input id="state" class="col-span-1 px-4 py-2 border rounded" maxlength="2" placeholder="UF" required />
-        <input id="city" class="col-span-1 px-4 py-2 border rounded" placeholder="Cidade" required />
+<body class="bg-gray-100 min-h-screen">
+  <!-- Top bar estilo “CriativAê” -->
+  <header class="w-full bg-amber-400 text-black">
+    <div class="max-w-md mx-auto px-4 py-2 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <!-- ajuste o caminho do logo se necessário -->
+        <img src="/assets/logo.svg" alt="Pague Leve" class="h-6">
+        <span class="font-semibold">Pague Leve</span>
       </div>
-      <div id="cep-info" class="text-sm text-green-600 font-medium"></div>
-      <input id="address1" class="w-full px-4 py-2 border rounded" placeholder="Rua / Avenida" required />
-      <div class="grid grid-cols-3 gap-2">
-        <input id="number" class="col-span-1 px-4 py-2 border rounded" placeholder="Número" required />
-        <input id="neighborhood" class="col-span-1 px-4 py-2 border rounded" placeholder="Bairro" required />
-        <input id="complement" class="col-span-1 px-4 py-2 border rounded" placeholder="Complemento" />
-      </div>
-      <p class="text-xs text-gray-500">Frete grátis. Endereço usado para nota fiscal e entrega.</p>
-    </div>
-
-    <!-- MÉTODO -->
-    <div class="space-y-2">
-      <label class="font-semibold block">Forma de pagamento</label>
-      <div class="flex gap-4">
-        <label class="flex items-center gap-2"><input type="radio" name="pmethod" value="pix" checked/>Pix</label>
-        <label class="flex items-center gap-2"><input type="radio" name="pmethod" value="boleto"/>Boleto</label>
-        <label class="flex items-center gap-2"><input type="radio" name="pmethod" value="card"/>Cartão</label>
+      <div class="flex items-center gap-2 text-sm">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 00-5 5v3H6a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2v-8a2 2 0 00-2-2h-1V7a5 5 0 00-5-5zm-3 8V7a3 3 0 016 0v3H9z"/></svg>
+        <span>Pagamento 100% seguro</span>
       </div>
     </div>
+  </header>
 
-    <!-- CAMPOS DO CARTÃO + PARCELAS -->
-    <div id="card-fields" class="space-y-2 hidden">
-      <input id="card_number" type="text" inputmode="numeric" maxlength="19" placeholder="0000 0000 0000 0000" class="w-full px-4 py-2 border rounded"/>
-      <div class="grid grid-cols-3 gap-2">
-        <input id="exp_month" type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="w-full px-4 py-2 border rounded"/>
-        <input id="exp_year" type="text" inputmode="numeric" maxlength="4" placeholder="AAAA" class="w-full px-4 py-2 border rounded"/>
-        <input id="cvv" type="text" inputmode="numeric" maxlength="4" placeholder="CVV" class="w-full px-4 py-2 border rounded"/>
-      </div>
+  <main class="flex items-start justify-center">
+    <form id="checkout-form" class="bg-white p-8 rounded shadow-md w-full max-w-md space-y-4 mt-6" autocomplete="off">
+      <!-- hidden do carrinho -->
+      <input id="cart_id" name="cart_id" type="hidden" />
+      <input id="total_cents" name="total_cents" type="hidden" />
 
-      <!-- Parcelas -->
+      <!-- DADOS PESSOAIS -->
+      <input id="name" type="text" placeholder="Nome completo" required class="w-full px-4 py-2 border rounded"/>
+      <input id="email" type="email" placeholder="E-mail" required class="w-full px-4 py-2 border rounded"/>
+      <input id="cpf" type="text" inputmode="numeric" placeholder="CPF (somente números)" required class="w-full px-4 py-2 border rounded"/>
+      <input id="phone" type="text" inputmode="numeric" placeholder="Celular (DDD+número)" required class="w-full px-4 py-2 border rounded"/>
+
+      <!-- VALOR -->
       <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Parcelas</label>
-        <select id="installments" class="w-full px-4 py-2 border rounded"></select>
-        <p class="text-xs text-gray-500 mt-1">
-          * Valores aproximados. Parcelamento com <strong>juros do emissor</strong> (configurado na Pagar.me).
-        </p>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Valor (R$)</label>
+        <input id="amount" type="text" value="10,00" placeholder="10,00" required class="w-full px-4 py-2 border rounded"/>
       </div>
-    </div>
 
-    <div class="flex gap-2">
-      <button id="pay-btn" type="submit" class="flex-1 bg-black text-white font-bold py-2 rounded hover:opacity-90">Pagar</button>
-      <button id="confirm-btn" type="button" disabled class="w-36 bg-gray-200 text-gray-600 font-semibold py-2 rounded cursor-not-allowed">
-        Já paguei
-      </button>
-    </div>
+      <!-- CUPOM -->
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Cupom de desconto (%)</label>
+        <div class="flex gap-2">
+          <input id="coupon" type="text" placeholder="DIGITE SEU CUPOM" class="flex-1 px-4 py-2 border rounded uppercase"/>
+          <button id="apply-coupon" type="button" class="px-4 bg-black text-white rounded">Aplicar</button>
+        </div>
+        <div id="coupon-msg" class="text-sm mt-1"></div>
+      </div>
 
-    <div id="status" class="text-center text-sm text-gray-700"></div>
-    <div id="extra" class="mt-4 space-y-2 text-sm"></div>
-  </form>
+      <!-- ENDEREÇO DE ENTREGA -->
+      <div class="space-y-2">
+        <div class="font-semibold">Endereço de entrega</div>
+        <div class="grid grid-cols-3 gap-2">
+          <input id="cep" class="col-span-1 px-4 py-2 border rounded" inputmode="numeric" placeholder="CEP (00000-000)" required />
+          <input id="state" class="col-span-1 px-4 py-2 border rounded" maxlength="2" placeholder="UF" required />
+          <input id="city" class="col-span-1 px-4 py-2 border rounded" placeholder="Cidade" required />
+        </div>
+        <div id="cep-info" class="text-sm text-green-600 font-medium"></div>
+        <input id="address1" class="w-full px-4 py-2 border rounded" placeholder="Rua / Avenida" required />
+        <div class="grid grid-cols-3 gap-2">
+          <input id="number" class="col-span-1 px-4 py-2 border rounded" placeholder="Número" required />
+          <input id="neighborhood" class="col-span-1 px-4 py-2 border rounded" placeholder="Bairro" required />
+          <input id="complement" class="col-span-1 px-4 py-2 border rounded" placeholder="Complemento" />
+        </div>
+        <p class="text-xs text-gray-500">Frete grátis. Endereço usado para nota fiscal e entrega.</p>
+      </div>
+
+      <!-- MÉTODO -->
+      <div class="space-y-2">
+        <label class="font-semibold block">Forma de pagamento</label>
+        <div class="flex gap-4">
+          <label class="flex items-center gap-2"><input type="radio" name="pmethod" value="pix" checked/>Pix</label>
+          <label class="flex items-center gap-2"><input type="radio" name="pmethod" value="boleto"/>Boleto</label>
+          <label class="flex items-center gap-2"><input type="radio" name="pmethod" value="card"/>Cartão</label>
+        </div>
+      </div>
+
+      <!-- CAMPOS DO CARTÃO + PARCELAS -->
+      <div id="card-fields" class="space-y-2 hidden">
+        <input id="card_number" type="text" inputmode="numeric" maxlength="19" placeholder="0000 0000 0000 0000" class="w-full px-4 py-2 border rounded"/>
+        <div class="grid grid-cols-3 gap-2">
+          <input id="exp_month" type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="w-full px-4 py-2 border rounded"/>
+          <input id="exp_year" type="text" inputmode="numeric" maxlength="4" placeholder="AAAA" class="w-full px-4 py-2 border rounded"/>
+          <input id="cvv" type="text" inputmode="numeric" maxlength="4" placeholder="CVV" class="w-full px-4 py-2 border rounded"/>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Parcelas</label>
+          <select id="installments" class="w-full px-4 py-2 border rounded"></select>
+          <p class="text-xs text-gray-500 mt-1">* Valores aproximados. Parcelamento com <strong>juros do emissor</strong>.</p>
+        </div>
+      </div>
+
+      <!-- Botão único -->
+      <div>
+        <button id="pay-btn" type="submit" class="w-full bg-black text-white font-bold py-2 rounded hover:opacity-90">
+          Pagar
+        </button>
+      </div>
+
+      <div id="status" class="text-center text-sm text-gray-700"></div>
+      <div id="extra" class="mt-4 space-y-2 text-sm"></div>
+
+      <!-- Rodapé de confiança -->
+      <footer class="pt-4 text-center text-xs text-gray-500">
+        <div class="flex items-center justify-center gap-4">
+          <span class="inline-flex items-center gap-1">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 00-5 5v3H6a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2v-8a2 2 0 00-2-2h-1V7a5 5 0 00-5-5zM9 10V7a3 3 0 016 0v3H9z"/></svg>
+            Pagamento 100% seguro
+          </span>
+          <span>•</span>
+          <span>Pix • Boleto • Cartão</span>
+          <span>•</span>
+          <span>Processado por Pagar.me</span>
+        </div>
+      </footer>
+    </form>
+  </main>
 
   <script>
+    // ===== elementos básicos =====
     const form = document.getElementById('checkout-form');
     const statusEl = document.getElementById('status');
     const extraEl  = document.getElementById('extra');
     const cardBox  = document.getElementById('card-fields');
     const btnPay   = document.getElementById('pay-btn');
-    const btnConfirm = document.getElementById('confirm-btn');
     const installmentsEl = document.getElementById('installments');
-    const amountEl = document.getElementById('amount');
-
-    // cupom
     const couponInput = document.getElementById('coupon');
-    const couponPercentInput = document.getElementById('coupon_percent');
-    const couponBtn = document.getElementById('apply-coupon');
-    const couponStatus = document.getElementById('coupon-status');
-
+    const couponMsg   = document.getElementById('coupon-msg');
+    const applyBtn    = document.getElementById('apply-coupon');
     let lastOrderId = null;
-    let discountPercent = 0;      // % aplicado
-    let baseAmountForDiscount;    // valor base antes do desconto (em R$)
+    let appliedCouponData = null; // preview do cupom para exibir valor final
 
     // ===== utils =====
     const brl = (n)=> (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
     function parseAmountBRL(v){ return String(v||'').replace(/[^\d,.\s]/g,'').replace(/\s+/g,'').replace(',','.'); }
-
-    function getAmountNumber(){
-      const v = parseFloat(parseAmountBRL(amountEl.value));
+    function amountToNumber(){
+      const v = parseFloat(parseAmountBRL(document.getElementById('amount').value));
       return Number.isFinite(v) ? v : 0;
-    }
-    function setAmountNumber(n){
-      amountEl.value = Number(n||0).toFixed(2).replace('.',',');
     }
 
     // ===== PREFILL seguro (cart_id / total_cents) e lock do valor =====
@@ -138,19 +166,17 @@
 
       const cartHidden  = document.getElementById('cart_id');
       const totalHidden = document.getElementById('total_cents');
+      const amountEl    = document.getElementById('amount');
 
       if (cartHidden && cartId) cartHidden.value = cartId;
       if (totalHidden && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
 
-      if (!Number.isNaN(totalCents)) {
-        setAmountNumber(totalCents/100);
+      if (amountEl && !Number.isNaN(totalCents)) {
+        amountEl.value = (totalCents/100).toFixed(2).replace('.',',');
         amountEl.readOnly = true;
         amountEl.classList.add('bg-gray-50');
         amountEl.title = 'Valor definido pelo carrinho da loja';
       }
-
-      // define base para desconto (se vier travado, usa o travado)
-      baseAmountForDiscount = getAmountNumber();
 
       form.addEventListener('submit', function(){
         if (cartHidden && !cartHidden.value) cartHidden.value = cartId || '';
@@ -158,58 +184,25 @@
       });
     })();
 
-    // ===== CUPOM: aplicar % e recalcular parcelas =====
-    function rebuildAmountWithDiscount() {
-      const base = baseAmountForDiscount ?? getAmountNumber();
-      const pct  = Math.max(0, Math.min(100, Number(couponPercentInput.value || discountPercent || 0)));
-      const final = base * (1 - pct/100);
-      setAmountNumber(final);
-      buildInstallments();
-    }
-
-    couponBtn.addEventListener('click', ()=>{
-      const pct = Number(couponPercentInput.value);
-      if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
-        couponStatus.textContent = '❌ Informe um percentual entre 0 e 100.';
-        couponStatus.classList.add('text-red-600');
-        couponStatus.classList.remove('text-green-600');
-        return;
-      }
-      discountPercent = pct;
-      // fixa a base (se o usuário mexeu manualmente, usa o valor atual como base)
-      baseAmountForDiscount = getAmountNumber();
-      rebuildAmountWithDiscount();
-
-      const code = (couponInput.value || '').trim().toUpperCase();
-      couponStatus.textContent = `✅ Cupom ${code || '(sem código)'} aplicado: ${pct}% OFF`;
-      couponStatus.classList.remove('text-red-600');
-      couponStatus.classList.add('text-green-600');
-    });
-
     // ===== parcelas =====
     function buildInstallments(){
       if (!installmentsEl) return;
-      const total = getAmountNumber();
+      const total = amountToNumber();
       let html = '';
       for (let n = 1; n <= 12; n++){
         const per = total / n;
-        if (n === 1){
-          html += `<option value="1">1x de ${brl(total)} à vista</option>`;
-        } else {
-          html += `<option value="${n}">${n}x de ${brl(per)} *</option>`;
-        }
+        if (n === 1) html += `<option value="1">1x de ${brl(total)} à vista</option>`;
+        else html += `<option value="${n}">${n}x de ${brl(per)} *</option>`;
       }
       installmentsEl.innerHTML = html;
     }
     buildInstallments();
-    if (!amountEl.readOnly){
-      amountEl.addEventListener('input', ()=>{
-        baseAmountForDiscount = getAmountNumber();
-        buildInstallments();
-      });
+    const amountElForChange = document.getElementById('amount');
+    if (amountElForChange && !amountElForChange.readOnly){
+      amountElForChange.addEventListener('input', buildInstallments);
     }
 
-    // ===== render helpers =====
+    // ===== helpers de render =====
     async function copy(text){ try{ await navigator.clipboard.writeText(text); alert('Copiado!'); }catch{ alert('Não foi possível copiar.'); } }
     function renderPix(pix){
       let html = '<div class="p-3 border rounded"><div class="font-semibold mb-1">Pix gerado:</div>';
@@ -239,7 +232,7 @@
         ${det ? `<div class="mt-1 text-xs text-gray-600">Detalhe: ${det}</div>` : ''}</div>`;
     }
 
-    // ===== máscaras leves =====
+    // ===== máscaras =====
     const cpfEl = document.getElementById('cpf');
     cpfEl.addEventListener('input', ()=>{
       let v = cpfEl.value.replace(/\D/g,'').slice(0,11);
@@ -260,7 +253,7 @@
       cardEl.value = v;
     });
 
-    // ===== CEP máscara + autofill ViaCEP =====
+    // ===== CEP máscara + ViaCEP =====
     const cepEl = document.getElementById('cep');
     const cepInfo = document.getElementById('cep-info');
     let cepLoading = false;
@@ -281,23 +274,17 @@
         cepInfo.textContent = '🔎 Buscando endereço...';
         const resp = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
         const data = await resp.json();
-        if (data?.erro) {
-          cepInfo.textContent = '❌ CEP não encontrado';
-          return;
-        }
+        if (data?.erro) { cepInfo.textContent = '❌ CEP não encontrado'; return; }
         document.getElementById("address1").value     = data.logradouro || "";
         document.getElementById("neighborhood").value = data.bairro || "";
         document.getElementById("city").value         = data.localidade || "";
         document.getElementById("state").value        = (data.uf || "").toUpperCase();
         cepInfo.textContent = `✅ ${data.localidade} / ${data.uf}`;
-      } catch (e) {
-        cepInfo.textContent = '⚠️ Erro ao buscar CEP';
-      } finally {
-        cepLoading = false;
-      }
+      } catch { cepInfo.textContent = '⚠️ Erro ao buscar CEP'; }
+      finally { cepLoading = false; }
     }
 
-    // alterna campos de cartão
+    // alterna cartão
     document.querySelectorAll('input[name="pmethod"]').forEach(r=>{
       r.addEventListener('change', ()=>{
         const m = document.querySelector('input[name="pmethod"]:checked').value;
@@ -305,16 +292,47 @@
       });
     });
 
+    // ===== CUPOM (preview no back) =====
+    applyBtn.addEventListener('click', async ()=>{
+      couponMsg.textContent = '';
+      appliedCouponData = null;
+      const code = couponInput.value.trim();
+      if (!code) { couponMsg.className='text-sm mt-1 text-red-600'; couponMsg.textContent='Informe um cupom.'; return; }
+
+      try {
+        const r = await fetch('/api/coupon-check', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ coupon: code, amountBRL: document.getElementById('amount').value, method: document.querySelector('input[name="pmethod"]:checked').value })
+        });
+        const j = await r.json();
+        if (!j.ok) {
+          couponMsg.className='text-sm mt-1 text-red-600';
+          couponMsg.textContent = 'Cupom inválido.';
+          return;
+        }
+        appliedCouponData = j;
+        const val = (j.final_amount_cents/100).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+        couponMsg.className='text-sm mt-1 text-green-600';
+        couponMsg.textContent = `Cupom aplicado: ${j.discount_percent}% OFF • total final ${val}`;
+      } catch {
+        couponMsg.className='text-sm mt-1 text-red-600';
+        couponMsg.textContent = 'Falha ao validar cupom.';
+      }
+    });
+
     // ===== submit /pay =====
     form.addEventListener('submit', async (e)=>{
       e.preventDefault();
+
+      // Pixel: InitiateCheckout
+      try { fbq('track','InitiateCheckout',{ value: amountToNumber(), currency:'BRL' }); } catch {}
+
       if (cepLoading) { statusEl.textContent = '⏳ Aguarde terminar a busca do CEP...'; return; }
 
       statusEl.textContent = 'Processando...';
       extraEl.innerHTML = '';
-      btnPay.disabled = true; btnConfirm.disabled = true;
+      btnPay.disabled = true;
       btnPay.classList.add("opacity-60","cursor-not-allowed");
-      btnConfirm.classList.add("cursor-not-allowed","bg-gray-200","text-gray-600");
       lastOrderId = null;
 
       const payload = {
@@ -323,14 +341,12 @@
         cpf:   document.getElementById('cpf').value.replace(/\D/g,''),
         phone: document.getElementById('phone').value.replace(/\D/g,''),
         method: document.querySelector('input[name="pmethod"]:checked').value,
-        amountBRL: parseAmountBRL(amountEl.value),
+        amountBRL: parseAmountBRL(document.getElementById('amount').value),
 
         cart_id: document.getElementById('cart_id').value || null,
         total_cents: document.getElementById('total_cents').value || null,
 
-        // cupom
-        coupon: (couponInput.value || '').trim().toUpperCase() || null,
-        discount_percent: Number(discountPercent || couponPercentInput.value || 0),
+        coupon: couponInput.value.trim() || null,
 
         card_number: (document.getElementById('card_number')?.value || '').replace(/\D/g,''),
         exp_month: Number(document.getElementById('exp_month')?.value || 0),
@@ -361,14 +377,33 @@
         if (result.boleto) extraEl.innerHTML += renderBoleto(result.boleto);
         if (result.card)   extraEl.innerHTML += renderCard(result.card);
 
-        // habilita "Já paguei" quando for PIX/BOLETO (confirma manual)
         const m = payload.method;
+
+        // Pixel: AddPaymentInfo quando gerar PIX/BOLETO
+        try {
+          const finalCents = Number(result?.data?.final_amount_cents ?? result?.data?.original_amount_cents ?? 0);
+          const val = (finalCents/100) || amountToNumber();
+          if (res.ok && (m==='pix' || m==='boleto')) {
+            fbq('track','AddPaymentInfo',{ value: val, currency:'BRL', payment_method: m });
+          }
+        } catch {}
+
+        // Pixel: Purchase quando cartão aprovado no ato
+        try {
+          if (m === 'card') {
+            const st = (result?.card?.status || result?.data?.charge_status || '').toLowerCase();
+            if (['paid','succeeded','captured','approved'].includes(st)) {
+              const finalCents = Number(result?.data?.final_amount_cents ?? 0);
+              fbq('track','Purchase',{ value: (finalCents/100) || amountToNumber(), currency:'BRL' });
+            }
+          }
+        } catch {}
+
         if (res.ok && lastOrderId && (m==='pix' || m==='boleto')){
-          btnConfirm.disabled = false;
-          btnConfirm.classList.remove("cursor-not-allowed","bg-gray-200","text-gray-600");
-          btnConfirm.classList.add("bg-white","border","hover:bg-gray-50");
+          extraEl.innerHTML += `<div class="p-3 border rounded text-sm">
+            Assim que o pagamento compensar, você receberá a confirmação no e-mail/WhatsApp.
+          </div>`;
         }
-        console.log('Resposta completa:', result);
       }catch(err){
         statusEl.textContent = '❌ Erro de conexão com o servidor.';
         console.error(err);
@@ -378,35 +413,14 @@
       }
     });
 
-    // ===== botão "Já paguei" -> POST /confirm =====
-    btnConfirm.addEventListener('click', async ()=>{
-      if (!lastOrderId) return;
-      btnConfirm.disabled = true;
-      btnConfirm.textContent = 'Checando...';
-      try{
-        const r = await fetch('/confirm',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ order_id: lastOrderId }) });
-        const j = await r.json();
-        if (j.ok && j.paid){
-          statusEl.textContent = '✅ Pagamento confirmado! Pedido criado na loja.';
-        }else{
-          statusEl.textContent = '⏳ Ainda não consta como pago. Tente novamente em alguns segundos.';
-        }
-      }catch(e){
-        statusEl.textContent = '❌ Falha ao confirmar pagamento.';
-      }finally{
-        btnConfirm.disabled = false;
-        btnConfirm.textContent = 'Já paguei';
-      }
-    });
-
-    // Prefill extra
+    // Prefill QS
     (function prefillFromQS(){
       const p = new URLSearchParams(location.search);
       if (p.has('name'))  document.getElementById('name').value = p.get('name');
       if (p.has('email')) document.getElementById('email').value = p.get('email');
       if (p.has('cpf'))   document.getElementById('cpf').value = p.get('cpf');
       if (p.has('phone')) document.getElementById('phone').value = p.get('phone');
-      if (p.has('amount')){ if(!amountEl.readOnly) amountEl.value=p.get('amount'); }
+      if (p.has('amount')){ const amt=document.getElementById('amount'); if(!amt.readOnly) amt.value=p.get('amount'); }
       if (p.has('method')){
         const m = p.get('method');
         const radio = document.querySelector(`input[name="pmethod"][value="${m}"]`);
