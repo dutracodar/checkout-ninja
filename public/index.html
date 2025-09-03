@@ -18,16 +18,15 @@
   </script>
   <noscript>
     <img height="1" width="1" style="display:none"
-      src="https://www.facebook.com/tr?id=PIXEL_ID&ev=PageView&noscript=1"/>
+      src="https://www.facebook.com/tr?id=750766562712140&ev=PageView&noscript=1"/>
   </noscript>
 </head>
 
 <body class="bg-gray-100 min-h-screen">
-  <!-- Top bar estilo “CriativAê” -->
+  <!-- Top bar estilo CriativAê -->
   <header class="w-full bg-amber-400 text-black">
     <div class="max-w-md mx-auto px-4 py-2 flex items-center justify-between">
       <div class="flex items-center gap-2">
-        <!-- usa o arquivo que está em /public -->
         <img src="logo-pagueleve.png" alt="Pague Leve" class="h-6">
       </div>
       <div class="flex items-center gap-2 text-sm">
@@ -39,23 +38,19 @@
 
   <main class="flex items-start justify-center">
     <form id="checkout-form" class="bg-white p-8 rounded shadow-md w-full max-w-md space-y-4 mt-6" autocomplete="off">
-      <!-- hidden do carrinho -->
       <input id="cart_id" name="cart_id" type="hidden" />
       <input id="total_cents" name="total_cents" type="hidden" />
 
-      <!-- DADOS PESSOAIS -->
       <input id="name" type="text" placeholder="Nome completo" required class="w-full px-4 py-2 border rounded"/>
       <input id="email" type="email" placeholder="E-mail" required class="w-full px-4 py-2 border rounded"/>
       <input id="cpf" type="text" inputmode="numeric" placeholder="CPF (somente números)" required class="w-full px-4 py-2 border rounded"/>
       <input id="phone" type="text" inputmode="numeric" placeholder="Celular (DDD+número)" required class="w-full px-4 py-2 border rounded"/>
 
-      <!-- VALOR -->
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Valor (R$)</label>
         <input id="amount" type="text" value="10,00" placeholder="10,00" required class="w-full px-4 py-2 border rounded"/>
       </div>
 
-      <!-- CUPOM -->
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Cupom de desconto (%)</label>
         <div class="flex gap-2">
@@ -65,7 +60,6 @@
         <div id="coupon-msg" class="text-sm mt-1"></div>
       </div>
 
-      <!-- ENDEREÇO DE ENTREGA -->
       <div class="space-y-2">
         <div class="font-semibold">Endereço de entrega</div>
         <div class="grid grid-cols-3 gap-2">
@@ -83,7 +77,6 @@
         <p class="text-xs text-gray-500">Frete grátis. Endereço usado para nota fiscal e entrega.</p>
       </div>
 
-      <!-- MÉTODO -->
       <div class="space-y-2">
         <label class="font-semibold block">Forma de pagamento</label>
         <div class="flex gap-4">
@@ -93,7 +86,6 @@
         </div>
       </div>
 
-      <!-- CAMPOS DO CARTÃO + PARCELAS -->
       <div id="card-fields" class="space-y-2 hidden">
         <input id="card_number" type="text" inputmode="numeric" maxlength="19" placeholder="0000 0000 0000 0000" class="w-full px-4 py-2 border rounded"/>
         <div class="grid grid-cols-3 gap-2">
@@ -108,7 +100,6 @@
         </div>
       </div>
 
-      <!-- Botão único -->
       <div>
         <button id="pay-btn" type="submit" class="w-full bg-black text-white font-bold py-2 rounded hover:opacity-90">
           Pagar
@@ -118,7 +109,6 @@
       <div id="status" class="text-center text-sm text-gray-700"></div>
       <div id="extra" class="mt-4 space-y-2 text-sm"></div>
 
-      <!-- Rodapé de confiança -->
       <footer class="pt-4 text-center text-xs text-gray-500">
         <div class="flex items-center justify-center gap-4">
           <span class="inline-flex items-center gap-1">
@@ -135,7 +125,6 @@
   </main>
 
   <script>
-    // ===== elementos básicos =====
     const form = document.getElementById('checkout-form');
     const statusEl = document.getElementById('status');
     const extraEl  = document.getElementById('extra');
@@ -145,10 +134,7 @@
     const couponInput = document.getElementById('coupon');
     const couponMsg   = document.getElementById('coupon-msg');
     const applyBtn    = document.getElementById('apply-coupon');
-    let lastOrderId = null;
-    let appliedCouponData = null; // preview do cupom para exibir valor final
 
-    // ===== utils =====
     const brl = (n)=> (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
     function parseAmountBRL(v){ return String(v||'').replace(/[^\d,.\s]/g,'').replace(/\s+/g,'').replace(',','.'); }
     function amountToNumber(){
@@ -156,7 +142,23 @@
       return Number.isFinite(v) ? v : 0;
     }
 
-    // ===== PREFILL seguro (cart_id / total_cents) e lock do valor =====
+    // ---- normalização forte do valor ----
+    const amountInput = document.getElementById('amount');
+    function formatAmountInput() {
+      const raw = (amountInput.value || '').replace(/\D/g, '');
+      if (!raw) { amountInput.value = ''; return; }
+      const v = (parseInt(raw, 10) || 0) / 100;
+      amountInput.value = v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    function normalizedAmountNumber() {
+      const raw = (amountInput.value || '').trim();
+      if (/^\d{4,}$/.test(raw)) return (parseInt(raw, 10) || 0) / 100;
+      const n = parseFloat(raw.replace(/\./g, '').replace(',', '.'));
+      return Number.isFinite(n) ? n : 0;
+    }
+    amountInput.addEventListener('blur', formatAmountInput);
+
+    // prefill/lock valor do carrinho
     (function securePrefillFromCart(){
       const qs = new URLSearchParams(location.search);
       const cartId = qs.get('cart_id') || '';
@@ -165,16 +167,15 @@
 
       const cartHidden  = document.getElementById('cart_id');
       const totalHidden = document.getElementById('total_cents');
-      const amountEl    = document.getElementById('amount');
 
       if (cartHidden && cartId) cartHidden.value = cartId;
       if (totalHidden && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
 
-      if (amountEl && !Number.isNaN(totalCents)) {
-        amountEl.value = (totalCents/100).toFixed(2).replace('.',',');
-        amountEl.readOnly = true;
-        amountEl.classList.add('bg-gray-50');
-        amountEl.title = 'Valor definido pelo carrinho da loja';
+      if (!Number.isNaN(totalCents)) {
+        amountInput.value = (totalCents/100).toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2});
+        amountInput.readOnly = true;
+        amountInput.classList.add('bg-gray-50');
+        amountInput.title = 'Valor definido pelo carrinho da loja';
       }
 
       form.addEventListener('submit', function(){
@@ -183,7 +184,6 @@
       });
     })();
 
-    // ===== parcelas =====
     function buildInstallments(){
       if (!installmentsEl) return;
       const total = amountToNumber();
@@ -196,12 +196,8 @@
       installmentsEl.innerHTML = html;
     }
     buildInstallments();
-    const amountElForChange = document.getElementById('amount');
-    if (amountElForChange && !amountElForChange.readOnly){
-      amountElForChange.addEventListener('input', buildInstallments);
-    }
+    if (!amountInput.readOnly) amountInput.addEventListener('input', buildInstallments);
 
-    // ===== helpers de render =====
     async function copy(text){ try{ await navigator.clipboard.writeText(text); alert('Copiado!'); }catch{ alert('Não foi possível copiar.'); } }
     function renderPix(pix){
       let html = '<div class="p-3 border rounded"><div class="font-semibold mb-1">Pix gerado:</div>';
@@ -231,7 +227,7 @@
         ${det ? `<div class="mt-1 text-xs text-gray-600">Detalhe: ${det}</div>` : ''}</div>`;
     }
 
-    // ===== máscaras =====
+    // máscaras
     const cpfEl = document.getElementById('cpf');
     cpfEl.addEventListener('input', ()=>{
       let v = cpfEl.value.replace(/\D/g,'').slice(0,11);
@@ -252,11 +248,10 @@
       cardEl.value = v;
     });
 
-    // ===== CEP máscara + ViaCEP =====
+    // CEP + ViaCEP
     const cepEl = document.getElementById('cep');
     const cepInfo = document.getElementById('cep-info');
     let cepLoading = false;
-
     cepEl.addEventListener('input', ()=>{
       let v = cepEl.value.replace(/\D/g,'').slice(0,8);
       if (v.length>5) v=v.replace(/(\d{5})(\d{0,3})/,'$1-$2');
@@ -264,7 +259,6 @@
       if (v.replace(/\D/g,'').length === 8) fillAddressFromCep(v);
     });
     cepEl.addEventListener('blur', () => fillAddressFromCep(cepEl.value));
-
     async function fillAddressFromCep(cepRaw) {
       const cep = String(cepRaw || '').replace(/\D/g, '');
       if (cep.length !== 8 || cepLoading) return;
@@ -291,17 +285,16 @@
       });
     });
 
-    // ===== CUPOM (preview no back) =====
+    // CUPOM preview
     applyBtn.addEventListener('click', async ()=>{
       couponMsg.textContent = '';
-      appliedCouponData = null;
       const code = couponInput.value.trim();
       if (!code) { couponMsg.className='text-sm mt-1 text-red-600'; couponMsg.textContent='Informe um cupom.'; return; }
 
       try {
         const r = await fetch('/api/coupon-check', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ coupon: code, amountBRL: document.getElementById('amount').value, method: document.querySelector('input[name="pmethod"]:checked').value })
+          body: JSON.stringify({ coupon: code, amountBRL: amountInput.value, method: document.querySelector('input[name="pmethod"]:checked').value })
         });
         const j = await r.json();
         if (!j.ok) {
@@ -309,7 +302,6 @@
           couponMsg.textContent = 'Cupom inválido.';
           return;
         }
-        appliedCouponData = j;
         const val = (j.final_amount_cents/100).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
         couponMsg.className='text-sm mt-1 text-green-600';
         couponMsg.textContent = `Cupom aplicado: ${j.discount_percent}% OFF • total final ${val}`;
@@ -319,20 +311,20 @@
       }
     });
 
-    // ===== submit /pay =====
+    // submit
     form.addEventListener('submit', async (e)=>{
       e.preventDefault();
-
-      // Pixel: InitiateCheckout
-      try { fbq('track','InitiateCheckout',{ value: amountToNumber(), currency:'BRL' }); } catch {}
+      try { fbq('track','InitiateCheckout',{ value: normalizedAmountNumber(), currency:'BRL' }); } catch {}
 
       if (cepLoading) { statusEl.textContent = '⏳ Aguarde terminar a busca do CEP...'; return; }
+
+      const nAmt = normalizedAmountNumber();
+      if (nAmt <= 0 || nAmt > 100000) { statusEl.textContent = 'Valor inválido.'; return; }
 
       statusEl.textContent = 'Processando...';
       extraEl.innerHTML = '';
       btnPay.disabled = true;
       btnPay.classList.add("opacity-60","cursor-not-allowed");
-      lastOrderId = null;
 
       const payload = {
         name:  document.getElementById('name').value.trim(),
@@ -340,7 +332,7 @@
         cpf:   document.getElementById('cpf').value.replace(/\D/g,''),
         phone: document.getElementById('phone').value.replace(/\D/g,''),
         method: document.querySelector('input[name="pmethod"]:checked').value,
-        amountBRL: parseAmountBRL(document.getElementById('amount').value),
+        amountBRL: String(nAmt),
 
         cart_id: document.getElementById('cart_id').value || null,
         total_cents: document.getElementById('total_cents').value || null,
@@ -369,36 +361,22 @@
         const result = await res.json();
 
         statusEl.textContent = res.ok ? '✅ Pedido criado!' : '❌ ' + (result.error || 'Falha');
-
-        if (result?.data?.order_id) lastOrderId = result.data.order_id;
-
         if (result.pix)    extraEl.innerHTML += renderPix(result.pix);
         if (result.boleto) extraEl.innerHTML += renderBoleto(result.boleto);
         if (result.card)   extraEl.innerHTML += renderCard(result.card);
 
         const m = payload.method;
-
-        // Pixel: AddPaymentInfo quando gerar PIX/BOLETO
         try {
           const finalCents = Number(result?.data?.final_amount_cents ?? result?.data?.original_amount_cents ?? 0);
-          const val = (finalCents/100) || amountToNumber();
-          if (res.ok && (m==='pix' || m==='boleto')) {
-            fbq('track','AddPaymentInfo',{ value: val, currency:'BRL', payment_method: m });
-          }
-        } catch {}
-
-        // Pixel: Purchase quando cartão aprovado no ato
-        try {
+          const val = (finalCents/100) || nAmt;
+          if (res.ok && (m==='pix' || m==='boleto')) fbq('track','AddPaymentInfo',{ value: val, currency:'BRL', payment_method: m });
           if (m === 'card') {
             const st = (result?.card?.status || result?.data?.charge_status || '').toLowerCase();
-            if (['paid','succeeded','captured','approved'].includes(st)) {
-              const finalCents = Number(result?.data?.final_amount_cents ?? 0);
-              fbq('track','Purchase',{ value: (finalCents/100) || amountToNumber(), currency:'BRL' });
-            }
+            if (['paid','succeeded','captured','approved'].includes(st)) fbq('track','Purchase',{ value: val, currency:'BRL' });
           }
         } catch {}
 
-        if (res.ok && lastOrderId && (m==='pix' || m==='boleto')){
+        if (res.ok && (m==='pix' || m==='boleto')){
           extraEl.innerHTML += `<div class="p-3 border rounded text-sm">
             Assim que o pagamento compensar, você receberá a confirmação no e-mail/WhatsApp.
           </div>`;
@@ -412,14 +390,13 @@
       }
     });
 
-    // Prefill QS
     (function prefillFromQS(){
       const p = new URLSearchParams(location.search);
       if (p.has('name'))  document.getElementById('name').value = p.get('name');
       if (p.has('email')) document.getElementById('email').value = p.get('email');
       if (p.has('cpf'))   document.getElementById('cpf').value = p.get('cpf');
       if (p.has('phone')) document.getElementById('phone').value = p.get('phone');
-      if (p.has('amount')){ const amt=document.getElementById('amount'); if(!amt.readOnly) amt.value=p.get('amount'); }
+      if (p.has('amount') && !amountInput.readOnly) amountInput.value = p.get('amount');
       if (p.has('method')){
         const m = p.get('method');
         const radio = document.querySelector(`input[name="pmethod"][value="${m}"]`);

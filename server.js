@@ -1,4 +1,4 @@
-// server.js — Cobrax Checkout (Pagar.me v5) — Pix, Boleto e Cartão
+// server.js — Pague Leve Checkout (Pagar.me v5) — Pix, Boleto e Cartão
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -11,44 +11,39 @@ const path = require("path");
 require("dotenv").config();
 
 const app = express();
-app.set("trust proxy", 1); // Render/NGINX
+app.set("trust proxy", 1);
 
-/* =========================
-   COBRAX <-> SHOPIFY BRIDGE
-   ========================= */
-const SHOP_DOMAIN   = process.env.SHOPIFY_STORE_DOMAIN;
+// ===== Shopify (opcional) =====
+const SHOP_DOMAIN   = process.env.SHOPIFY_STORE_DOMAIN || "";
 const SHOP_VERSION  = process.env.SHOPIFY_API_VERSION || "2024-04";
-const SHOP_TOKEN    = process.env.SHOPIFY_API_TOKEN;
+const SHOP_TOKEN    = process.env.SHOPIFY_API_TOKEN || "";
 const PROXY_PREFIX  = process.env.APP_PROXY_PREFIX  || "apps/cobrax";
 const PROXY_SUBPATH = process.env.APP_PROXY_SUBPATH || "checkout";
 const CHECKOUT_BASE = process.env.CHECKOUT_BASE_URL || "https://checkout.pagueleve.com";
 
-/* =========================
-   Webhook signing (opcional)
-   ========================= */
+// ===== Webhook signing (opcional) =====
 const WH_SECRET = process.env.PAGARME_WEBHOOK_SECRET || "";
 const WH_HEADER = (process.env.PAGARME_WEBHOOK_HEADER || "").toLowerCase();
 const WH_ALGO   = (process.env.PAGARME_WEBHOOK_ALGO || "sha256").toLowerCase();
 
-// Captura raw body SÓ para /webhook (precisa p/ assinatura)
+// raw body só no webhook
 app.use("/webhook", express.raw({ type: "*/*" }));
-// Demais rotas em JSON
+// json no resto
 app.use((req, res, next) => {
   if (req.path === "/webhook") return next();
   express.json({ limit: "1mb", type: "*/*" })(req, res, next);
 });
 app.use(express.urlencoded({ extended: true }));
 
-// -------- middlewares base --------
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
 app.use(morgan("combined"));
-// Deixa aberto por enquanto; dá pra restringir depois
 app.use(cors());
 app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
 
-// ---------- helpers ----------
+// ===== helpers =====
 async function shopifyAdmin(pathApi, method = "GET", body = null, extraHeaders = {}) {
+  if (!SHOP_DOMAIN || !SHOP_TOKEN) throw new Error("Shopify não configurado");
   const url = `https://${SHOP_DOMAIN}/admin/api/${SHOP_VERSION}/${pathApi}`;
   const headers = { "X-Shopify-Access-Token": SHOP_TOKEN, "Content-Type": "application/json", ...extraHeaders };
   const opts = { method, headers, timeout: 20000 };
@@ -56,12 +51,27 @@ async function shopifyAdmin(pathApi, method = "GET", body = null, extraHeaders =
   return axios({ url, ...opts });
 }
 const onlyDigits = (s) => (s ? String(s).replace(/\D/g, "") : "");
+
+// **robusta contra “×100”**
 function brlToCents(v) {
   if (v == null) return 0;
-  if (typeof v === "number") return Math.round(v * 100);
-  const n = Number(String(v).replace(/\./g, "").replace(",", "."));
-  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+
+  if (typeof v === "number") {
+    return Math.max(0, Math.round(v * 100)); // número = reais
+  }
+
+  const s = String(v).trim();
+
+  // "16900" => centavos
+  if (/^\d{4,}$/.test(s)) {
+    return Math.max(0, parseInt(s, 10));
+  }
+
+  // "169,00" ou "1.690,00" => reais
+  const n = Number(s.replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(n) ? Math.max(0, Math.round(n * 100)) : 0;
 }
+
 function authHeader() {
   const key = process.env.PAGARME_API_KEY || "";
   return "Basic " + Buffer.from(`${key}:`).toString("base64");
@@ -103,9 +113,7 @@ async function waitChargeReady(orderId, kind){
   return { order, charge: order.charges?.[0] || null, tx: order.charges?.[0]?.last_transaction || null };
 }
 
-/* =========================
-   COUPONS — regras centralizadas (back = fonte da verdade)
-   ========================= */
+// ===== Coupons (fonte da verdade no back) =====
 function evaluateCoupon({ code, amount_cents, method }) {
   const coupon = String(code || "").trim().toUpperCase();
   const m = String(method || "pix").toLowerCase();
@@ -138,16 +146,12 @@ function evaluateCoupon({ code, amount_cents, method }) {
   return { ok: false, reason: "cupom não encontrado" };
 }
 
-/* =========================
-   UI (SPA)
-   ========================= */
+// ===== UI =====
 const PUB = path.join(__dirname, "public");
 app.use(express.static(PUB));
 app.get(["/", "/checkout"], (_req, res) => res.sendFile(path.join(PUB, "index.html")));
 
-/* =========================
-   App Proxy -> redireciona pro Cobrax (quando usar proxy oficial)
-   ========================= */
+// ===== App Proxy (Shopify, opcional) =====
 app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
   try {
     const qs = new URLSearchParams(req.query).toString();
@@ -159,10 +163,10 @@ app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
   }
 });
 
-/* =========================
-   Shopify order creation helper
-   ========================= */
+// ===== Shopify order helper (opcional) =====
 async function createShopifyPaidOrderFromPagarmePayload(body) {
+  if (!SHOP_DOMAIN || !SHOP_TOKEN) return { created: false, reason: "shopify_not_configured" };
+
   const charges = body?.charges || body?.data?.charges || [];
   const charge  = charges[0] || body?.charge || {};
   const tx      = charge?.last_transaction || {};
@@ -173,9 +177,8 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
   const amountCents = Number(charge?.amount || body?.amount || 0);
   const amountBRL   = (amountCents / 100).toFixed(2);
   const buyerEmail  = body?.customer?.email || body?.customer?.address?.email || "cliente@exemplo.com";
-  const buyerName   = body?.customer?.name  || "Cliente Cobrax";
+  const buyerName   = body?.customer?.name  || "Cliente Pague Leve";
 
-  // tenta itens no metadata
   let metaItemsRaw = charge?.metadata?.items ?? body?.metadata?.items ?? body?.items;
   let parsedItems = [];
   try {
@@ -183,7 +186,7 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
     else if (typeof metaItemsRaw === "string") parsedItems = JSON.parse(metaItemsRaw);
   } catch {}
 
-  let lineItems = [{ title: "Pedido Cobrax", quantity: 1, price: amountBRL }];
+  let lineItems = [{ title: "Pedido Pague Leve", quantity: 1, price: amountBRL }];
   if (parsedItems.length > 0) {
     lineItems = parsedItems.map(it => ({
       title: it.title || it.sku || "Item",
@@ -226,7 +229,7 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
       line_items: lineItems,
       customer: { first_name: buyerName, email: buyerEmail },
       shipping_address,
-      tags: "cobrax,pagarme",
+      tags: "pague-leve,pagarme",
     },
   };
 
@@ -235,9 +238,7 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
   return { created: true, shopify_order_id: r.data?.order?.id || null };
 }
 
-/* =========================
-   API — inicia o fluxo
-   ========================= */
+// ===== APIs =====
 app.get("/api/checkout-start", (req, res) => {
   const cart_id = String(req.query.cart_id || "").trim();
   const total_raw = String(req.query.total_cents || "").trim();
@@ -247,9 +248,6 @@ app.get("/api/checkout-start", (req, res) => {
   return res.status(200).json({ ok: true, step: "checkout:start", cart_id, total_cents });
 });
 
-/* =========================
-   Pré-validação de cupom (preview)
-   ========================= */
 app.post("/api/coupon-check", async (req, res) => {
   try {
     const { coupon, amountBRL, method } = req.body || {};
@@ -278,9 +276,6 @@ app.post("/api/coupon-check", async (req, res) => {
   }
 });
 
-/* =========================
-   /pay — cria ordem no Pagar.me (PIX / Boleto / Cartão)
-   ========================= */
 app.post("/pay", async (req, res) => {
   try {
     if (!process.env.PAGARME_API_KEY)
@@ -288,19 +283,17 @@ app.post("/pay", async (req, res) => {
 
     const {
       name, email, cpf, phone,
-      method,               // "pix" | "boleto" | "card"
-      amountBRL,
+      method, amountBRL,
       card_number, exp_month, exp_year, cvv,
-      installments,         // nº parcelas
-      address,              // { cep, address1, number, complement, neighborhood, city, state }
-      coupon                // código do cupom (string)
+      installments, address, coupon
     } = req.body || {};
 
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
     if (!method)          return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
 
-    // ===== DESCONTO/CUPOM — cálculo seguro no back =====
     const amountOriginal = Math.max(1, brlToCents(amountBRL || "1"));
+
+    // cupom
     let discountValue = 0;
     let pct = 0;
     if (coupon) {
@@ -315,10 +308,10 @@ app.post("/pay", async (req, res) => {
     }
     const amountFinal = Math.max(1, amountOriginal - discountValue);
 
-    // regras de mínimos opcionais
+    // mínimos (opcionais)
     if (method === "card") {
       const parc = Math.max(1, Number(installments || 1));
-      const per = Math.floor(amountFinal / parc);
+      const per  = Math.floor(amountFinal / parc);
       if (per < 100) return res.status(400).json({ success:false, error:"Cada parcela precisa ser ≥ R$ 1,00." });
     }
     if (method === "boleto" && amountFinal < 1000) {
@@ -363,7 +356,6 @@ app.post("/pay", async (req, res) => {
       country: "BR"
     };
 
-    // IMPORTANTE: descrição exigida pelo v5 (evita 422)
     const shipping = {
       name,
       description: "Entrega padrão",
@@ -377,7 +369,6 @@ app.post("/pay", async (req, res) => {
       }
     };
 
-    // metadata comum
     const commonMetadata = {
       ua, ip,
       coupon: coupon || null,
@@ -387,11 +378,10 @@ app.post("/pay", async (req, res) => {
       final_amount_cents: amountFinal
     };
 
-    // item simples com valor final
     const items = [{
-      code: "SKU-COBRAX-001",
-      name: "Pedido Cobrax",
-      description: "Checkout Cobrax",
+      code: "SKU-PAGUELEVE-001",
+      name: "Pedido Pague Leve",
+      description: "Checkout Pague Leve",
       quantity: 1,
       amount: amountFinal
     }];
@@ -411,7 +401,7 @@ app.post("/pay", async (req, res) => {
         credit_card: {
           capture: true,
           installments: cardInstallments,
-          statement_descriptor: "COBRAX",
+          statement_descriptor: "PAGUELEVE",
           card: {
             number: String(card_number).replace(/\s+/g, ""),
             exp_month: Number(exp_month),
@@ -437,7 +427,7 @@ app.post("/pay", async (req, res) => {
     let charge = order.charges?.[0];
     let tx = charge?.last_transaction || {};
 
-    console.log("🧾 Order:", order.id, "| método:", method, "| valor_final:", amountFinal);
+    console.log("🧾 Order:", order.id, "| método:", method, "| valor_final_cents:", amountFinal);
 
     // polling (pix/boleto)
     if (method === "pix" || method === "boleto") {
@@ -481,11 +471,9 @@ app.post("/pay", async (req, res) => {
   }
 });
 
-/* =========================
-   WEBHOOK Pagar.me -> cria pedido na Shopify quando pago
-   ========================= */
+// ===== Webhook (opcional -> Shopify) =====
 function verifyWebhook(req) {
-  if (!WH_SECRET || !WH_HEADER) return true; // verificação desativada
+  if (!WH_SECRET || !WH_HEADER) return true;
   try {
     const headerVal = (req.headers[WH_HEADER] || "").toString();
     if (!headerVal) return false;
@@ -497,7 +485,6 @@ function verifyWebhook(req) {
     return false;
   }
 }
-
 app.post("/webhook", async (req, res) => {
   try {
     if (!verifyWebhook(req)) {
@@ -519,10 +506,8 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// Health
+// ===== util =====
 app.get("/health", (_req, res) => res.json({ ok: true }));
-
-// Consulta order
 app.get("/order/:id", async (req, res) => {
   try {
     const order = await fetchOrder(req.params.id);
@@ -532,8 +517,6 @@ app.get("/order/:id", async (req, res) => {
     res.status(500).json({ success: false, error: e.message || "Falha ao consultar order" });
   }
 });
-
-// Refund/cancel
 app.post("/refund", async (req, res) => {
   try {
     const { charge_id, amount } = req.body || {};
@@ -545,39 +528,10 @@ app.post("/refund", async (req, res) => {
   }
 });
 
-/* =========================
-   Plano B: confirmar manualmente quando status virar "paid"
-   ========================= */
-app.post("/confirm", express.json(), async (req, res) => {
-  try {
-    const { order_id } = req.body || {};
-    if (!order_id) return res.status(400).json({ ok:false, error:"order_id é obrigatório" });
-
-    const order = await fetchOrder(order_id);
-    const charge = order.charges?.[0];
-    const tx = charge?.last_transaction || {};
-    const status = (tx?.status || charge?.status || order?.status || "").toLowerCase();
-
-    const paid = ["paid","succeeded","captured","approved"].includes(status);
-    if (!paid) return res.status(200).json({ ok:true, paid:false, status });
-
-    const payload = { id: order.id, status: order.status, charges: [ { ...charge, last_transaction: tx } ], customer: order.customer || {}, shipping: order.shipping || undefined };
-    const result = await createShopifyPaidOrderFromPagarmePayload(payload);
-    return res.status(200).json({ ok:true, paid:true, created: result.created, shopify_order_id: result.shopify_order_id || null });
-  } catch (e) {
-    console.error("/confirm error:", e?.response?.data || e.message);
-    return res.status(500).json({ ok:false, error: e.message || "Falha no confirm" });
-  }
-});
-
-/* =========================
-   Fallback SPA — depois de TODAS as APIs
-   ========================= */
+// SPA fallback
 app.get(/^\/(?!api\/|pay$|webhook$|order\/|refund$|confirm$).*/, (_req, res) => {
   res.sendFile(path.join(PUB, "index.html"));
 });
-
-// 404 apenas para APIs (não quebra SPA/UI)
 app.use("/api", (_req, res) => res.status(404).json({ ok: false, error: "Not found" }));
 
 const PORT = process.env.PORT || 3000;
