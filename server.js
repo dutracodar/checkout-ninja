@@ -25,10 +25,6 @@ const CHECKOUT_BASE = process.env.CHECKOUT_BASE_URL || "https://checkout.paguele
 
 /* =========================
    Webhook signing (opcional)
-   Se a Pagar.me fornecer segredo + header, preencha:
-   - PAGARME_WEBHOOK_SECRET
-   - PAGARME_WEBHOOK_HEADER (ex.: "x-hub-signature" ou "x-pagarme-signature")
-   - PAGARME_WEBHOOK_ALGO   (ex.: "sha256")
    ========================= */
 const WH_SECRET = process.env.PAGARME_WEBHOOK_SECRET || "";
 const WH_HEADER = (process.env.PAGARME_WEBHOOK_HEADER || "").toLowerCase();
@@ -129,7 +125,7 @@ app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
 });
 
 /* =========================
-   Shopify order creation helper (reuso no webhook e /confirm)
+   Shopify order creation helper
    ========================= */
 async function createShopifyPaidOrderFromPagarmePayload(body) {
   const charges = body?.charges || body?.data?.charges || [];
@@ -173,7 +169,6 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
   if (txId)       noteAttrs.push({ name: "pagarme_tx_id", value: String(txId) });
   if (statusTag)  noteAttrs.push({ name: "pagarme_status", value: statusTag });
 
-  // endereço de entrega (se vier no payload)
   const shipping_address = body?.shipping ? {
     first_name: buyerName,
     address1: body.shipping.address?.line_1 || '',
@@ -233,13 +228,21 @@ app.post("/pay", async (req, res) => {
       amountBRL,
       card_number, exp_month, exp_year, cvv,
       installments,         // nº parcelas
-      address               // { cep, address1, number, complement, neighborhood, city, state }
+      address,              // { cep, address1, number, complement, neighborhood, city, state }
+      // [DESCONTO] novos campos vindos do front:
+      coupon,
+      discount_percent
     } = req.body || {};
 
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
     if (!method)          return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
 
-    const amount = Math.max(1, brlToCents(amountBRL || "1"));
+    // [DESCONTO] calcula desconto com segurança no back
+    const pct = Math.max(0, Math.min(100, Number(discount_percent || 0)));
+    const amountOriginal = Math.max(1, brlToCents(amountBRL || "1"));
+    const discountValue  = Math.floor(amountOriginal * (pct / 100));
+    const amountFinal    = Math.max(1, amountOriginal - discountValue);
+
     const cpfDigits = onlyDigits(cpf);
     if (cpfDigits.length !== 11) return res.status(400).json({ success: false, error: "CPF inválido. Use 11 dígitos." });
 
@@ -278,7 +281,7 @@ app.post("/pay", async (req, res) => {
       country: "BR"
     };
 
-    // IMPORTANTE: descrição exigida pelo v5 (evita 422 'order.shipping.description')
+    // IMPORTANTE: descrição exigida pelo v5 (evita 422)
     const shipping = {
       name,
       description: "Entrega padrão",
@@ -292,21 +295,31 @@ app.post("/pay", async (req, res) => {
       }
     };
 
-    // item simples
+    // [DESCONTO] metadata comum (ordem/charge)
+    const commonMetadata = {
+      ua, ip,
+      coupon: coupon || null,
+      discount_percent: pct,
+      discount_amount_cents: discountValue,
+      original_amount_cents: amountOriginal,
+      final_amount_cents: amountFinal
+    };
+
+    // item simples já com valor com desconto
     const items = [{
       code: "SKU-COBRAX-001",
       name: "Pedido Cobrax",
       description: "Checkout Cobrax",
       quantity: 1,
-      amount
+      amount: amountFinal // unit_amount em centavos
     }];
 
     let payments = [];
     if (method === "pix") {
-      payments = [{ payment_method: "pix", pix: { expires_in: 1800 }, metadata: { ua, ip } }];
+      payments = [{ payment_method: "pix", pix: { expires_in: 1800 }, metadata: commonMetadata }];
     } else if (method === "boleto") {
       const due = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
-      payments = [{ payment_method: "boleto", boleto: { due_at: due, instructions: "Pague até o vencimento." }, metadata: { ua, ip } }];
+      payments = [{ payment_method: "boleto", boleto: { due_at: due, instructions: "Pague até o vencimento." }, metadata: commonMetadata }];
     } else if (method === "card") {
       if (!card_number || !exp_month || !exp_year || !cvv)
         return res.status(400).json({ success: false, error: "Dados do cartão incompletos." });
@@ -315,7 +328,7 @@ app.post("/pay", async (req, res) => {
         payment_method: "credit_card",
         credit_card: {
           capture: true,
-          installments: cardInstallments, // PARCELAS
+          installments: cardInstallments,
           statement_descriptor: "COBRAX",
           card: {
             number: String(card_number).replace(/\s+/g, ""),
@@ -326,14 +339,16 @@ app.post("/pay", async (req, res) => {
           },
           holder_document: cpfDigits,
           billing_address,
-          metadata: { ua, ip }
+          metadata: commonMetadata
         }
       }];
     } else {
       return res.status(400).json({ success: false, error: "Método inválido." });
     }
 
-    const payload = { customer, items, payments, closed: true, shipping };
+    // [DESCONTO] adiciona metadata na ordem também
+    const payload = { customer, items, payments, closed: true, shipping, metadata: commonMetadata };
+
     const headers = { Authorization: authHeader(), "Content-Type": "application/json", "Idempotency-Key": randomUUID() };
 
     // cria order
@@ -342,7 +357,7 @@ app.post("/pay", async (req, res) => {
     let charge = order.charges?.[0];
     let tx = charge?.last_transaction || {};
 
-    console.log("🧾 Order:", order.id, "| método:", method);
+    console.log("🧾 Order:", order.id, "| método:", method, "| valor_final:", amountFinal);
 
     // polling (pix/boleto)
     if (method === "pix" || method === "boleto") {
@@ -361,7 +376,18 @@ app.post("/pay", async (req, res) => {
 
     const out = {
       success: true,
-      data: { order_id: order.id, status: order.status, charge_status: charge?.status || null, charge_id: charge?.id || null, transaction_id: tx?.id || null }
+      data: {
+        order_id: order.id,
+        status: order.status,
+        charge_status: charge?.status || null,
+        charge_id: charge?.id || null,
+        transaction_id: tx?.id || null,
+        // [DESCONTO] ecoa infos pro front
+        original_amount_cents: amountOriginal,
+        discount_percent: pct,
+        discount_amount_cents: discountValue,
+        final_amount_cents: amountFinal
+      }
     };
     if (method === "pix") out.pix = { qr_code: tx.qr_code || tx.qr_code_text || tx.emv || null, qr_code_url: tx.qr_code_url || tx.image_url || null, qr_code_base64: qrCodeBase64 || tx.qr_code_base64 || null, status: tx.status || charge?.status || order.status || null };
     if (method === "boleto") out.boleto = { url: tx?.url || tx?.pdf?.url || tx?.pdf_url || charge?.url || charge?.pdf?.url || null, line: tx?.line || tx?.line_code || charge?.line || charge?.line_code || null, status: tx?.status || charge?.status || order?.status || null };
@@ -386,7 +412,6 @@ function verifyWebhook(req) {
     if (!headerVal) return false;
     const raw = req.body instanceof Buffer ? req.body : Buffer.from(req.body || "");
     const hmac = createHmac(WH_ALGO, WH_SECRET).update(raw).digest("hex");
-    // formatos possíveis: "sha256=abcdef..." ou só "abcdef..."
     const token = headerVal.includes("=") ? headerVal.split("=").pop() : headerVal;
     return token && hmac && token.trim().toLowerCase() === hmac.toLowerCase();
   } catch {
@@ -398,7 +423,7 @@ app.post("/webhook", async (req, res) => {
   try {
     if (!verifyWebhook(req)) {
       console.warn("⚠️ Assinatura de webhook inválida");
-      return res.sendStatus(200); // responde 200 pra não gerar retries infinitos
+      return res.sendStatus(200);
     }
     const json = (() => {
       try { return JSON.parse(req.body.toString("utf8") || "{}"); }
