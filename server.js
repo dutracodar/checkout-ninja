@@ -285,15 +285,34 @@ app.post("/pay", async (req, res) => {
       name, email, cpf, phone,
       method, amountBRL,
       card_number, exp_month, exp_year, cvv,
-      installments, address, coupon
+      installments, address, coupon,
+      total_cents    // <- vem do front (carrinho/Shopify)
     } = req.body || {};
 
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
     if (!method)          return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
 
-    const amountOriginal = Math.max(1, brlToCents(amountBRL || "1"));
+    // -------- VALOR ORIGINAL (prioriza carrinho) --------
+    let amountOriginal = 0;
+    const forcedCents = Number.parseInt(total_cents, 10);
 
-    // cupom
+    if (Number.isFinite(forcedCents) && forcedCents >= 100) {
+      // Usa o valor do carrinho (centavos)
+      amountOriginal = forcedCents;
+
+      // Auditoria: se o campo digitado divergir MUITO do carrinho, só loga (o carrinho prevalece)
+      try {
+        const typed = brlToCents(amountBRL || "0");
+        if (typed && Math.abs(typed - forcedCents) > 1) {
+          console.warn("💡 Amount mismatch ignorado (front x cart)", { typed, forcedCents });
+        }
+      } catch {}
+    } else {
+      // Fallback seguro: usa o que foi digitado
+      amountOriginal = Math.max(1, brlToCents(amountBRL || "1"));
+    }
+
+    // -------- CUPOM --------
     let discountValue = 0;
     let pct = 0;
     if (coupon) {
@@ -318,16 +337,17 @@ app.post("/pay", async (req, res) => {
       return res.status(400).json({ success:false, error:"Valor mínimo para boleto é R$ 10,00." });
     }
 
-    const cpfDigits = onlyDigits(cpf);
+    const onlyNum = onlyDigits;
+    const cpfDigits = onlyNum(cpf);
     if (cpfDigits.length !== 11) return res.status(400).json({ success: false, error: "CPF inválido. Use 11 dígitos." });
 
-    const phoneDigits = onlyDigits(phone || "");
+    const phoneDigits = onlyNum(phone || "");
     if (phoneDigits.length < 10 || phoneDigits.length > 11)
       return res.status(400).json({ success: false, error: "Celular inválido. Use DDD + número (10 ou 11 dígitos)." });
     const area_code = phoneDigits.slice(0, 2);
     const phoneNumber = phoneDigits.slice(2);
 
-    const cepDigits = onlyDigits(address?.cep || "");
+    const cepDigits = onlyNum(address?.cep || "");
     if (address && cepDigits && cepDigits.length !== 8) {
       return res.status(400).json({ success:false, error:"CEP inválido (8 dígitos)." });
     }
