@@ -6,14 +6,14 @@
   <title>Pague Leve — Checkout</title>
   <script src="https://cdn.tailwindcss.com"></script>
 
-  <!-- Meta Pixel (troque PIXEL_ID pelo seu) -->
+  <!-- Meta Pixel (750766562712140) -->
   <script>
   !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?
   n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;
   n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;
   t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,
   document,'script','https://connect.facebook.net/en_US/fbevents.js');
-  fbq('init','PIXEL_ID');
+  fbq('init','750766562712140');
   fbq('track','PageView');
   </script>
   <noscript>
@@ -27,9 +27,8 @@
   <header class="w-full bg-amber-400 text-black">
     <div class="max-w-md mx-auto px-4 py-2 flex items-center justify-between">
       <div class="flex items-center gap-2">
-        <!-- ajuste o caminho do logo se necessário -->
-        <img src="/assets/logo.svg" alt="Pague Leve" class="h-6">
-        <span class="font-semibold">Pague Leve</span>
+        <!-- usa o arquivo que está em /public -->
+        <img src="logo-pagueleve.png" alt="Pague Leve" class="h-6">
       </div>
       <div class="flex items-center gap-2 text-sm">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 00-5 5v3H6a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2v-8a2 2 0 00-2-2h-1V7a5 5 0 00-5-5zm-3 8V7a3 3 0 016 0v3H9z"/></svg>
@@ -209,9 +208,9 @@
       if (pix.qr_code_base64) html += `<img class="mx-auto" alt="QR Pix" src="data:image/png;base64,${pix.qr_code_base64}" />`;
       if (pix.qr_code_url) html += `<div class="mt-2"><a class="text-blue-600 underline" target="_blank" rel="noopener noreferrer" href="${pix.qr_code_url}">Abrir QR Code</a></div>`;
       if (pix.qr_code){
-        const copyStr = JSON.stringify(pix.qr_code);
+        const copyStr = String(pix.qr_code).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
         html += `<div class="mt-2 break-all"><strong>Copia & Cola:</strong><br>${pix.qr_code}
-          <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick='copy(${copyStr})'>Copiar</button></div>`;
+          <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick="copy('${copyStr}')">Copiar</button></div>`;
       }
       html += '</div>'; return html;
     }
@@ -219,9 +218,9 @@
       let html = '<div class="p-3 border rounded"><div class="font-semibold mb-1">Boleto gerado</div>';
       if (b.url) html += `<div><a class="text-blue-600 underline" target="_blank" rel="noopener noreferrer" href="${b.url}">Abrir boleto (PDF)</a></div>`;
       if (b.line){
-        const copyStr = JSON.stringify(b.line);
+        const copyStr = String(b.line).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
         html += `<div class="mt-2 break-all"><strong>Linha digitável:</strong><br>${b.line}
-          <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick='copy(${copyStr})'>Copiar</button></div>`;
+          <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick="copy('${copyStr}')">Copiar</button></div>`;
       }
       html += '</div>'; return html;
     }
