@@ -27,15 +27,17 @@
     </div>
 
     <!-- CUPOM -->
-    <div>
-      <label class="block text-sm font-medium text-gray-700 mb-1">Cupom de desconto (%)</label>
-      <div class="flex gap-2">
-        <input id="coupon" type="text" placeholder="EXEMPLO" class="flex-1 px-4 py-2 border rounded"/>
-        <input id="coupon_percent" type="number" min="0" max="100" step="1" placeholder="0" class="w-28 px-4 py-2 border rounded" />
-        <button type="button" id="apply-coupon" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Aplicar</button>
-      </div>
-      <p id="coupon-status" class="text-xs text-gray-500 mt-1"></p>
-    </div>
+<div class="space-y-2">
+  <label class="font-semibold block">Cupom de desconto</label>
+  <div class="flex gap-2">
+    <input id="coupon" type="text" placeholder="Digite seu cupom" class="flex-1 px-4 py-2 border rounded uppercase"/>
+    <button id="apply-coupon" type="button" class="px-4 bg-gray-900 text-white rounded hover:opacity-90">
+      Aplicar
+    </button>
+  </div>
+  <div id="coupon-msg" class="text-sm"></div>
+</div>
+
 
     <!-- ENDEREÇO DE ENTREGA -->
     <div class="space-y-2">

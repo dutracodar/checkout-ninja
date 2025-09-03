@@ -104,6 +104,41 @@ async function waitChargeReady(orderId, kind){
 }
 
 /* =========================
+   COUPONS — regras centralizadas (back = fonte da verdade)
+   ========================= */
+function evaluateCoupon({ code, amount_cents, method }) {
+  const coupon = String(code || "").trim().toUpperCase();
+  const m = String(method || "pix").toLowerCase();
+  const amt = Math.max(0, Number(amount_cents || 0));
+
+  if (!coupon) return { ok: false, reason: "cupom vazio" };
+  if (amt < 100) return { ok: false, reason: "valor muito baixo" };
+
+  if (coupon === "NATAL10") {
+    const pct = 10;
+    return { ok: true, pct, discount_cents: Math.floor((pct/100)*amt), label: "10% OFF" };
+  }
+  if (coupon === "PIX5") {
+    if (m !== "pix") return { ok:false, reason: "válido somente para Pix" };
+    const pct = 5;
+    return { ok: true, pct, discount_cents: Math.floor((pct/100)*amt), label: "5% OFF (Pix)" };
+  }
+  if (coupon === "PRIMEIRA") {
+    const pct = 15;               // 15% com teto de R$30
+    const cap = 3000;
+    const bruto = Math.floor((pct/100)*amt);
+    return { ok:true, pct, discount_cents: Math.min(bruto, cap), label: "15% OFF (até R$30)" };
+  }
+  if (coupon === "DESCONTO100") {
+    const discount_cents = Math.min(amt - 100, 1000000); // deixa final ~R$1
+    if (discount_cents <= 0) return { ok:false, reason:"valor já mínimo" };
+    return { ok:true, pct: Math.round(100*discount_cents/amt), discount_cents, label:"valor simbólico" };
+  }
+
+  return { ok: false, reason: "cupom não encontrado" };
+}
+
+/* =========================
    UI (SPA)
    ========================= */
 const PUB = path.join(__dirname, "public");
@@ -140,7 +175,7 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
   const buyerEmail  = body?.customer?.email || body?.customer?.address?.email || "cliente@exemplo.com";
   const buyerName   = body?.customer?.name  || "Cliente Cobrax";
 
-  // Tenta ler itens do metadata
+  // tenta itens no metadata
   let metaItemsRaw = charge?.metadata?.items ?? body?.metadata?.items ?? body?.items;
   let parsedItems = [];
   try {
@@ -148,9 +183,7 @@ async function createShopifyPaidOrderFromPagarmePayload(body) {
     else if (typeof metaItemsRaw === "string") parsedItems = JSON.parse(metaItemsRaw);
   } catch {}
 
-  // Fallback 1 item
   let lineItems = [{ title: "Pedido Cobrax", quantity: 1, price: amountBRL }];
-
   if (parsedItems.length > 0) {
     lineItems = parsedItems.map(it => ({
       title: it.title || it.sku || "Item",
@@ -215,6 +248,37 @@ app.get("/api/checkout-start", (req, res) => {
 });
 
 /* =========================
+   Pré-validação de cupom (preview)
+   ========================= */
+app.post("/api/coupon-check", async (req, res) => {
+  try {
+    const { coupon, amountBRL, method } = req.body || {};
+    const amount = Math.max(1, brlToCents(amountBRL || "0"));
+    const coup = evaluateCoupon({
+      code: coupon,
+      amount_cents: amount,
+      method: String(method || "pix").toLowerCase()
+    });
+
+    if (!coup.ok) return res.json({ ok:false, reason: coup.reason || "inválido" });
+
+    const discount_cents = coup.discount_cents || 0;
+    const final_amount_cents = Math.max(1, amount - discount_cents);
+    const pct = coup.pct ?? Math.round(100 * discount_cents / amount);
+
+    return res.json({
+      ok: true,
+      label: coup.label || "",
+      discount_percent: pct,
+      discount_cents,
+      final_amount_cents
+    });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error: e.message || "Falha no coupon-check" });
+  }
+});
+
+/* =========================
    /pay — cria ordem no Pagar.me (PIX / Boleto / Cartão)
    ========================= */
 app.post("/pay", async (req, res) => {
@@ -229,19 +293,37 @@ app.post("/pay", async (req, res) => {
       card_number, exp_month, exp_year, cvv,
       installments,         // nº parcelas
       address,              // { cep, address1, number, complement, neighborhood, city, state }
-      // [DESCONTO] novos campos vindos do front:
-      coupon,
-      discount_percent
+      coupon                // código do cupom (string)
     } = req.body || {};
 
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
     if (!method)          return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
 
-    // [DESCONTO] calcula desconto com segurança no back
-    const pct = Math.max(0, Math.min(100, Number(discount_percent || 0)));
+    // ===== DESCONTO/CUPOM — cálculo seguro no back =====
     const amountOriginal = Math.max(1, brlToCents(amountBRL || "1"));
-    const discountValue  = Math.floor(amountOriginal * (pct / 100));
-    const amountFinal    = Math.max(1, amountOriginal - discountValue);
+    let discountValue = 0;
+    let pct = 0;
+    if (coupon) {
+      const coup = evaluateCoupon({
+        code: coupon,
+        amount_cents: amountOriginal,
+        method: String(method || "pix").toLowerCase()
+      });
+      if (!coup.ok) return res.status(400).json({ success:false, error:`Cupom inválido: ${coup.reason}` });
+      discountValue = coup.discount_cents || 0;
+      pct = coup.pct ?? Math.round(100 * discountValue / amountOriginal);
+    }
+    const amountFinal = Math.max(1, amountOriginal - discountValue);
+
+    // regras de mínimos opcionais
+    if (method === "card") {
+      const parc = Math.max(1, Number(installments || 1));
+      const per = Math.floor(amountFinal / parc);
+      if (per < 100) return res.status(400).json({ success:false, error:"Cada parcela precisa ser ≥ R$ 1,00." });
+    }
+    if (method === "boleto" && amountFinal < 1000) {
+      return res.status(400).json({ success:false, error:"Valor mínimo para boleto é R$ 10,00." });
+    }
 
     const cpfDigits = onlyDigits(cpf);
     if (cpfDigits.length !== 11) return res.status(400).json({ success: false, error: "CPF inválido. Use 11 dígitos." });
@@ -295,7 +377,7 @@ app.post("/pay", async (req, res) => {
       }
     };
 
-    // [DESCONTO] metadata comum (ordem/charge)
+    // metadata comum
     const commonMetadata = {
       ua, ip,
       coupon: coupon || null,
@@ -305,13 +387,13 @@ app.post("/pay", async (req, res) => {
       final_amount_cents: amountFinal
     };
 
-    // item simples já com valor com desconto
+    // item simples com valor final
     const items = [{
       code: "SKU-COBRAX-001",
       name: "Pedido Cobrax",
       description: "Checkout Cobrax",
       quantity: 1,
-      amount: amountFinal // unit_amount em centavos
+      amount: amountFinal
     }];
 
     let payments = [];
@@ -346,9 +428,7 @@ app.post("/pay", async (req, res) => {
       return res.status(400).json({ success: false, error: "Método inválido." });
     }
 
-    // [DESCONTO] adiciona metadata na ordem também
     const payload = { customer, items, payments, closed: true, shipping, metadata: commonMetadata };
-
     const headers = { Authorization: authHeader(), "Content-Type": "application/json", "Idempotency-Key": randomUUID() };
 
     // cria order
@@ -382,7 +462,6 @@ app.post("/pay", async (req, res) => {
         charge_status: charge?.status || null,
         charge_id: charge?.id || null,
         transaction_id: tx?.id || null,
-        // [DESCONTO] ecoa infos pro front
         original_amount_cents: amountOriginal,
         discount_percent: pct,
         discount_amount_cents: discountValue,
