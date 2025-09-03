@@ -31,14 +31,15 @@
     <div class="space-y-2">
       <div class="font-semibold">Endereço de entrega</div>
       <div class="grid grid-cols-3 gap-2">
-        <input id="cep" class="col-span-1 px-4 py-2 border rounded" inputmode="numeric" placeholder="CEP (00000-000)" />
-        <input id="state" class="col-span-1 px-4 py-2 border rounded" maxlength="2" placeholder="UF" />
-        <input id="city" class="col-span-1 px-4 py-2 border rounded" placeholder="Cidade" />
+        <input id="cep" class="col-span-1 px-4 py-2 border rounded" inputmode="numeric" placeholder="CEP (00000-000)" required />
+        <input id="state" class="col-span-1 px-4 py-2 border rounded" maxlength="2" placeholder="UF" required />
+        <input id="city" class="col-span-1 px-4 py-2 border rounded" placeholder="Cidade" required />
       </div>
-      <input id="address1" class="w-full px-4 py-2 border rounded" placeholder="Rua / Avenida" />
+      <div id="cep-info" class="text-sm text-green-600 font-medium"></div>
+      <input id="address1" class="w-full px-4 py-2 border rounded" placeholder="Rua / Avenida" required />
       <div class="grid grid-cols-3 gap-2">
-        <input id="number" class="col-span-1 px-4 py-2 border rounded" placeholder="Número" />
-        <input id="neighborhood" class="col-span-1 px-4 py-2 border rounded" placeholder="Bairro" />
+        <input id="number" class="col-span-1 px-4 py-2 border rounded" placeholder="Número" required />
+        <input id="neighborhood" class="col-span-1 px-4 py-2 border rounded" placeholder="Bairro" required />
         <input id="complement" class="col-span-1 px-4 py-2 border rounded" placeholder="Complemento" />
       </div>
       <p class="text-xs text-gray-500">Frete grátis. Endereço usado para nota fiscal e entrega.</p>
@@ -68,9 +69,8 @@
         <label class="block text-sm font-medium text-gray-700 mb-1">Parcelas</label>
         <select id="installments" class="w-full px-4 py-2 border rounded"></select>
         <p class="text-xs text-gray-500 mt-1">
-  * Valores aproximados. Parcelamento com <strong>juros do emissor</strong> (configurado na Pagar.me).
-</p>
-
+          * Valores aproximados. Parcelamento com <strong>juros do emissor</strong> (configurado na Pagar.me).
+        </p>
       </div>
     </div>
 
@@ -132,20 +132,19 @@
       return Number.isFinite(v) ? v : 0;
     }
     function buildInstallments(){
-  if (!installmentsEl) return;
-  const total = amountToNumber();
-  let html = '';
-  for (let n = 1; n <= 12; n++){
-    const per = total / n;
-    if (n === 1){
-      html += `<option value="1">1x de ${brl(total)} à vista</option>`;
-    } else {
-      html += `<option value="${n}">${n}x de ${brl(per)} *</option>`;
+      if (!installmentsEl) return;
+      const total = amountToNumber();
+      let html = '';
+      for (let n = 1; n <= 12; n++){
+        const per = total / n;
+        if (n === 1){
+          html += `<option value="1">1x de ${brl(total)} à vista</option>`;
+        } else {
+          html += `<option value="${n}">${n}x de ${brl(per)} *</option>`;
+        }
+      }
+      installmentsEl.innerHTML = html;
     }
-  }
-  installmentsEl.innerHTML = html;
-}
-
     buildInstallments();
     const amountElForChange = document.getElementById('amount');
     if (amountElForChange && !amountElForChange.readOnly){
@@ -196,20 +195,49 @@
       else v=v.replace(/(\d{2})(\d{4})(\d{0,4})/,'$1 $2-$3');
       phoneEl.value = v.trim();
     });
-    const cepEl = document.getElementById('cep');
-    cepEl.addEventListener('input', ()=>{
-      let v = cepEl.value.replace(/\D/g,'').slice(0,8);
-      if (v.length>5) v=v.replace(/(\d{5})(\d{0,3})/,'$1-$2');
-      cepEl.value = v;
-    });
-    const ufEl = document.getElementById('state');
-    ufEl.addEventListener('input', ()=>{ ufEl.value = ufEl.value.replace(/[^A-Za-z]/g,'').toUpperCase().slice(0,2); });
     const cardEl = document.getElementById('card_number');
     if (cardEl) cardEl.addEventListener('input', ()=>{
       let v = cardEl.value.replace(/\D/g,'').slice(0,16);
       v = v.replace(/(\d{4})(?=\d)/g,'$1 ');
       cardEl.value = v;
     });
+
+    // ===== CEP máscara + autofill ViaCEP =====
+    const cepEl = document.getElementById('cep');
+    const cepInfo = document.getElementById('cep-info');
+    let cepLoading = false;
+
+    cepEl.addEventListener('input', ()=>{
+      let v = cepEl.value.replace(/\D/g,'').slice(0,8);
+      if (v.length>5) v=v.replace(/(\d{5})(\d{0,3})/,'$1-$2');
+      cepEl.value = v;
+      if (v.replace(/\D/g,'').length === 8) fillAddressFromCep(v);
+    });
+    cepEl.addEventListener('blur', () => fillAddressFromCep(cepEl.value));
+
+    async function fillAddressFromCep(cepRaw) {
+      const cep = String(cepRaw || '').replace(/\D/g, '');
+      if (cep.length !== 8 || cepLoading) return;
+      cepLoading = true;
+      try {
+        cepInfo.textContent = '🔎 Buscando endereço...';
+        const resp = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+        const data = await resp.json();
+        if (data?.erro) {
+          cepInfo.textContent = '❌ CEP não encontrado';
+          return;
+        }
+        document.getElementById("address1").value     = data.logradouro || "";
+        document.getElementById("neighborhood").value = data.bairro || "";
+        document.getElementById("city").value         = data.localidade || "";
+        document.getElementById("state").value        = (data.uf || "").toUpperCase();
+        cepInfo.textContent = `✅ ${data.localidade} / ${data.uf}`;
+      } catch (e) {
+        cepInfo.textContent = '⚠️ Erro ao buscar CEP';
+      } finally {
+        cepLoading = false;
+      }
+    }
 
     // alterna campos de cartão
     document.querySelectorAll('input[name="pmethod"]').forEach(r=>{
@@ -222,6 +250,8 @@
     // ===== submit /pay =====
     form.addEventListener('submit', async (e)=>{
       e.preventDefault();
+      if (cepLoading) { statusEl.textContent = '⏳ Aguarde terminar a busca do CEP...'; return; }
+
       statusEl.textContent = 'Processando...';
       extraEl.innerHTML = '';
       btnPay.disabled = true; btnConfirm.disabled = true;
