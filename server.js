@@ -13,6 +13,11 @@ require("dotenv").config();
 const app = express();
 app.set("trust proxy", 1);
 
+// ===== Feature flags / env =====
+const ENFORCE_TOTAL =
+  String(process.env.ENFORCE_TOTAL_CENTS || "").toLowerCase() === "1" ||
+  String(process.env.ENFORCE_TOTAL_CENTS || "").toLowerCase() === "true";
+
 // ===== Shopify (opcional) =====
 const SHOP_DOMAIN   = process.env.SHOPIFY_STORE_DOMAIN || "";
 const SHOP_VERSION  = process.env.SHOPIFY_API_VERSION || "2024-04";
@@ -52,22 +57,12 @@ async function shopifyAdmin(pathApi, method = "GET", body = null, extraHeaders =
 }
 const onlyDigits = (s) => (s ? String(s).replace(/\D/g, "") : "");
 
-// **robusta contra “×100”**
+// Conversão robusta BRL -> centavos (aceita "169,00", "1.690,00", 169, "16900")
 function brlToCents(v) {
   if (v == null) return 0;
-
-  if (typeof v === "number") {
-    return Math.max(0, Math.round(v * 100)); // número = reais
-  }
-
+  if (typeof v === "number") return Math.max(0, Math.round(v * 100)); // número em reais
   const s = String(v).trim();
-
-  // "16900" => centavos
-  if (/^\d{4,}$/.test(s)) {
-    return Math.max(0, parseInt(s, 10));
-  }
-
-  // "169,00" ou "1.690,00" => reais
+  if (/^\d{4,}$/.test(s)) return Math.max(0, parseInt(s, 10));        // "16900" -> centavos
   const n = Number(s.replace(/\./g, "").replace(",", "."));
   return Number.isFinite(n) ? Math.max(0, Math.round(n * 100)) : 0;
 }
@@ -276,40 +271,61 @@ app.post("/api/coupon-check", async (req, res) => {
   }
 });
 
+// ===== /pay (com ENFORCE_TOTAL_CENTS) =====
 app.post("/pay", async (req, res) => {
   try {
-    if (!process.env.PAGARME_API_KEY)
+    if (!process.env.PAGARME_API_KEY) {
       return res.status(500).json({ success: false, error: "PAGARME_API_KEY ausente no .env" });
+    }
+
+    const ENFORCE = String(process.env.ENFORCE_TOTAL_CENTS || "0") === "1";
 
     const {
       name, email, cpf, phone,
       method, amountBRL,
       card_number, exp_month, exp_year, cvv,
       installments, address, coupon,
-      total_cents    // <- vem do front (carrinho/Shopify)
+      total_cents               // <- vem do front (carrinho/Shopify)
     } = req.body || {};
 
+    // validações básicas
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
     if (!method)          return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
 
-    // -------- VALOR ORIGINAL (prioriza carrinho) --------
+    // -------- VALOR ORIGINAL (prioriza carrinho; opcionalmente obrigatório) --------
     let amountOriginal = 0;
     const forcedCents = Number.parseInt(total_cents, 10);
 
-    if (Number.isFinite(forcedCents) && forcedCents >= 100) {
-      // Usa o valor do carrinho (centavos)
+    if (ENFORCE) {
+      // com ENFORCE=1, total_cents é obrigatório e deve ser válido (>= R$ 1,00)
+      if (!Number.isFinite(forcedCents) || forcedCents < 100) {
+        return res.status(400).json({
+          success: false,
+          error: "total_cents ausente ou inválido. Reabra o checkout a partir do carrinho da loja."
+        });
+      }
       amountOriginal = forcedCents;
 
-      // Auditoria: se o campo digitado divergir MUITO do carrinho, só loga (o carrinho prevalece)
+      // auditoria: se o usuário digitou algo divergente, apenas logamos; carrinho prevalece
       try {
         const typed = brlToCents(amountBRL || "0");
         if (typed && Math.abs(typed - forcedCents) > 1) {
-          console.warn("💡 Amount mismatch ignorado (front x cart)", { typed, forcedCents });
+          console.warn("💡 ENFORCE ativo — diferença ignorada (front x cart)", { typed, forcedCents });
         }
       } catch {}
     } else {
-      // Fallback seguro: usa o que foi digitado
-      amountOriginal = Math.max(1, brlToCents(amountBRL || "1"));
+      // sem ENFORCE: se veio total_cents OK, usa; senão, usa o digitado (com normalização robusta)
+      if (Number.isFinite(forcedCents) && forcedCents >= 100) {
+        amountOriginal = forcedCents;
+        try {
+          const typed = brlToCents(amountBRL || "0");
+          if (typed && Math.abs(typed - forcedCents) > 1) {
+            console.warn("💡 Amount mismatch ignorado (front x cart)", { typed, forcedCents });
+          }
+        } catch {}
+      } else {
+        amountOriginal = Math.max(1, brlToCents(amountBRL || "1"));
+      }
     }
 
     // -------- CUPOM --------
@@ -337,17 +353,17 @@ app.post("/pay", async (req, res) => {
       return res.status(400).json({ success:false, error:"Valor mínimo para boleto é R$ 10,00." });
     }
 
-    const onlyNum = onlyDigits;
-    const cpfDigits = onlyNum(cpf);
+    // documentos & contato
+    const cpfDigits = onlyDigits(cpf);
     if (cpfDigits.length !== 11) return res.status(400).json({ success: false, error: "CPF inválido. Use 11 dígitos." });
 
-    const phoneDigits = onlyNum(phone || "");
+    const phoneDigits = onlyDigits(phone || "");
     if (phoneDigits.length < 10 || phoneDigits.length > 11)
       return res.status(400).json({ success: false, error: "Celular inválido. Use DDD + número (10 ou 11 dígitos)." });
     const area_code = phoneDigits.slice(0, 2);
     const phoneNumber = phoneDigits.slice(2);
 
-    const cepDigits = onlyNum(address?.cep || "");
+    const cepDigits = onlyDigits(address?.cep || "");
     if (address && cepDigits && cepDigits.length !== 8) {
       return res.status(400).json({ success:false, error:"CEP inválido (8 dígitos)." });
     }
@@ -406,6 +422,7 @@ app.post("/pay", async (req, res) => {
       amount: amountFinal
     }];
 
+    // pagamentos
     let payments = [];
     if (method === "pix") {
       payments = [{ payment_method: "pix", pix: { expires_in: 1800 }, metadata: commonMetadata }];
@@ -438,10 +455,10 @@ app.post("/pay", async (req, res) => {
       return res.status(400).json({ success: false, error: "Método inválido." });
     }
 
+    // cria ordem no Pagar.me
     const payload = { customer, items, payments, closed: true, shipping, metadata: commonMetadata };
     const headers = { Authorization: authHeader(), "Content-Type": "application/json", "Idempotency-Key": randomUUID() };
 
-    // cria order
     const create = await axios.post("https://api.pagar.me/core/v5/orders", payload, { headers, timeout: 30000 });
     let order = create.data;
     let charge = order.charges?.[0];
@@ -449,13 +466,13 @@ app.post("/pay", async (req, res) => {
 
     console.log("🧾 Order:", order.id, "| método:", method, "| valor_final_cents:", amountFinal);
 
-    // polling (pix/boleto)
+    // polling pra pegar QR/linha digitável
     if (method === "pix" || method === "boleto") {
       const result = await waitChargeReady(order.id, method);
       order = result.order; charge = result.charge; tx = result.tx || {};
     }
 
-    // tenta obter QR base64 se vier só URL
+    // tenta baixar QR base64 se só tiver URL
     let qrCodeBase64 = tx?.qr_code_base64 || null;
     if (method === "pix" && !qrCodeBase64 && tx?.qr_code_url) {
       try {
@@ -464,6 +481,7 @@ app.post("/pay", async (req, res) => {
       } catch (e) { console.warn("⚠️ Falha ao baixar QR base64:", e?.response?.status || e.message); }
     }
 
+    // resposta
     const out = {
       success: true,
       data: {
@@ -555,4 +573,6 @@ app.get(/^\/(?!api\/|pay$|webhook$|order\/|refund$|confirm$).*/, (_req, res) => 
 app.use("/api", (_req, res) => res.status(404).json({ ok: false, error: "Not found" }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => console.log(`🟢 Server on :${PORT}`));
+app.listen(PORT, "0.0.0.0", () =>
+  console.log(`🟢 Server on :${PORT} | ENFORCE_TOTAL_CENTS=${ENFORCE_TOTAL}`)
+);

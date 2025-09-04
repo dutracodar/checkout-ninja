@@ -145,9 +145,11 @@
     const couponMsg   = document.getElementById('coupon-msg');
     const applyBtn    = document.getElementById('apply-coupon');
 
+    // Flag para saber se veio total do carrinho
+    let HAS_TOTAL_FROM_CART = false;
+
     // utils
     const brl = (n)=> (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
-    function parseAmountBRL(v){ return String(v||'').replace(/[^\d,.\s]/g,'').replace(/\s+/g,'').replace(',','.'); }
 
     // amount handlers
     const amountInput = document.getElementById('amount');
@@ -165,7 +167,7 @@
     }
     amountInput.addEventListener('blur', formatAmountInput);
 
-    // Prefill/lock com total_cents
+    // Prefill/lock com total_cents + bloqueio quando faltar
     (function securePrefillFromCart(){
       const qs = new URLSearchParams(location.search);
       const cartId = qs.get('cart_id') || '';
@@ -179,13 +181,24 @@
       if (totalHidden && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
 
       if (!Number.isNaN(totalCents)) {
+        HAS_TOTAL_FROM_CART = true;
         amountInput.value = (totalCents/100).toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2});
         amountInput.readOnly = true;
         amountInput.classList.add('bg-gray-50');
         amountInput.title = 'Valor definido pelo carrinho da loja';
+      } else {
+        // Sem total: avisa e trava o botão
+        statusEl.classList.add('text-red-600');
+        statusEl.textContent = 'Abra o checkout a partir da loja para continuar.';
+        btnPay.disabled = true;
+        btnPay.classList.add("opacity-60","cursor-not-allowed");
       }
 
-      form.addEventListener('submit', function(){
+      form.addEventListener('submit', function(e){
+        if (!HAS_TOTAL_FROM_CART) {
+          e.preventDefault();
+          return false;
+        }
         if (cartHidden && !cartHidden.value) cartHidden.value = cartId || '';
         if (totalHidden && !totalHidden.value && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
       });
@@ -326,6 +339,7 @@
       e.preventDefault();
       try { fbq('track','InitiateCheckout',{ value: normalizedAmountNumber(), currency:'BRL' }); } catch {}
 
+      if (!HAS_TOTAL_FROM_CART) { return; } // segurança extra no front
       if (cepLoading) { statusEl.textContent = '⏳ Aguarde terminar a busca do CEP...'; return; }
 
       const nAmt = normalizedAmountNumber();
