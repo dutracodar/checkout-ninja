@@ -43,15 +43,15 @@
       <input id="total_cents" name="total_cents" type="hidden" />
 
       <!-- Dados -->
-      <input id="name" type="text" placeholder="Nome completo" required class="w-full px-4 py-2 border rounded"/>
-      <input id="email" type="email" placeholder="E-mail" required class="w-full px-4 py-2 border rounded"/>
-      <input id="cpf" type="text" inputmode="numeric" placeholder="CPF (somente números)" required class="w-full px-4 py-2 border rounded"/>
-      <input id="phone" type="text" inputmode="numeric" placeholder="Celular (DDD+número)" required class="w-full px-4 py-2 border rounded"/>
+      <input id="name"  type="text"  placeholder="Nome completo" required class="w-full px-4 py-2 border rounded" autocomplete="name"/>
+      <input id="email" type="email" placeholder="E-mail" required class="w-full px-4 py-2 border rounded" autocomplete="email"/>
+      <input id="cpf"   type="text" inputmode="numeric" placeholder="CPF (somente números)" required class="w-full px-4 py-2 border rounded" autocomplete="off"/>
+      <input id="phone" type="text" inputmode="numeric" placeholder="Celular (DDD+número)" required class="w-full px-4 py-2 border rounded" autocomplete="tel"/>
 
       <!-- Valor -->
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">Valor (R$)</label>
-        <!-- sem valor padrão! evita o bug do iPhone -->
+        <!-- sem valor padrão! evita bug no iPhone -->
         <input id="amount" type="text" inputmode="decimal" placeholder="Ex.: 179,00" required class="w-full px-4 py-2 border rounded"/>
       </div>
 
@@ -69,16 +69,16 @@
       <div class="space-y-2">
         <div class="font-semibold">Endereço de entrega</div>
         <div class="grid grid-cols-3 gap-2">
-          <input id="cep" class="col-span-1 px-4 py-2 border rounded" inputmode="numeric" placeholder="CEP (00000-000)" required />
-          <input id="state" class="col-span-1 px-4 py-2 border rounded" maxlength="2" placeholder="UF" required />
-          <input id="city" class="col-span-1 px-4 py-2 border rounded" placeholder="Cidade" required />
+          <input id="cep" class="col-span-1 px-4 py-2 border rounded" inputmode="numeric" placeholder="CEP (00000-000)" required autocomplete="postal-code"/>
+          <input id="state" class="col-span-1 px-4 py-2 border rounded" maxlength="2" placeholder="UF" required autocomplete="address-level1" oninput="this.value=this.value.toUpperCase()"/>
+          <input id="city" class="col-span-1 px-4 py-2 border rounded" placeholder="Cidade" required autocomplete="address-level2"/>
         </div>
         <div id="cep-info" class="text-sm text-green-600 font-medium"></div>
-        <input id="address1" class="w-full px-4 py-2 border rounded" placeholder="Rua / Avenida" required />
+        <input id="address1" class="w-full px-4 py-2 border rounded" placeholder="Rua / Avenida" required autocomplete="address-line1"/>
         <div class="grid grid-cols-3 gap-2">
-          <input id="number" class="col-span-1 px-4 py-2 border rounded" placeholder="Número" required />
-          <input id="neighborhood" class="col-span-1 px-4 py-2 border rounded" placeholder="Bairro" required />
-          <input id="complement" class="col-span-1 px-4 py-2 border rounded" placeholder="Complemento" />
+          <input id="number" class="col-span-1 px-4 py-2 border rounded" placeholder="Número" required autocomplete="address-line2"/>
+          <input id="neighborhood" class="col-span-1 px-4 py-2 border rounded" placeholder="Bairro" required autocomplete="address-level4"/>
+          <input id="complement" class="col-span-1 px-4 py-2 border rounded" placeholder="Complemento" autocomplete="off"/>
         </div>
         <p class="text-xs text-gray-500">Frete grátis. Endereço usado para nota fiscal e entrega.</p>
       </div>
@@ -95,11 +95,11 @@
 
       <!-- Cartão -->
       <div id="card-fields" class="space-y-2 hidden">
-        <input id="card_number" type="text" inputmode="numeric" maxlength="19" placeholder="0000 0000 0000 0000" class="w-full px-4 py-2 border rounded"/>
+        <input id="card_number" type="text" inputmode="numeric" maxlength="19" placeholder="0000 0000 0000 0000" class="w-full px-4 py-2 border rounded" autocomplete="cc-number"/>
         <div class="grid grid-cols-3 gap-2">
-          <input id="exp_month" type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="w-full px-4 py-2 border rounded"/>
-          <input id="exp_year" type="text" inputmode="numeric" maxlength="4" placeholder="AAAA" class="w-full px-4 py-2 border rounded"/>
-          <input id="cvv" type="text" inputmode="numeric" maxlength="4" placeholder="CVV" class="w-full px-4 py-2 border rounded"/>
+          <input id="exp_month" type="text" inputmode="numeric" maxlength="2" placeholder="MM" class="w-full px-4 py-2 border rounded" autocomplete="cc-exp-month"/>
+          <input id="exp_year"  type="text" inputmode="numeric" maxlength="4" placeholder="AAAA" class="w-full px-4 py-2 border rounded" autocomplete="cc-exp-year"/>
+          <input id="cvv"       type="text" inputmode="numeric" maxlength="4" placeholder="CVV" class="w-full px-4 py-2 border rounded" autocomplete="cc-csc"/>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Parcelas</label>
@@ -170,7 +170,7 @@
       const qs = new URLSearchParams(location.search);
       const cartId = qs.get('cart_id') || '';
       const totalRaw = qs.get('total_cents');
-      const totalCents = totalRaw !== null ? parseInt(totalRaw,10) : NaN;
+      const totalCents = totalRaw ? parseInt(totalRaw,10) : NaN;
 
       const cartHidden  = document.getElementById('cart_id');
       const totalHidden = document.getElementById('total_cents');
