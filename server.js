@@ -43,7 +43,14 @@ app.use(express.urlencoded({ extended: true }));
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
 app.use(morgan("combined"));
-app.use(cors());
+// CORS mais seguro (ajuste os domínios da sua loja)
+app.use(cors({
+  origin: [
+    "https://pagueleve.com",
+    "https://checkout.pagueleve.com",
+    "https://*.myshopify.com"
+  ]
+}));
 app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
 
 // ===== helpers =====
@@ -57,12 +64,12 @@ async function shopifyAdmin(pathApi, method = "GET", body = null, extraHeaders =
 }
 const onlyDigits = (s) => (s ? String(s).replace(/\D/g, "") : "");
 
-// Conversão robusta BRL -> centavos (aceita "169,00", "1.690,00", 169, "16900")
+// Conversão robusta BRL -> centavos (fallback legado)
 function brlToCents(v) {
   if (v == null) return 0;
-  if (typeof v === "number") return Math.max(0, Math.round(v * 100)); // número em reais
+  if (typeof v === "number") return Math.max(0, Math.round(v * 100));
   const s = String(v).trim();
-  if (/^\d{4,}$/.test(s)) return Math.max(0, parseInt(s, 10));        // "16900" -> centavos
+  if (/^\d{4,}$/.test(s)) return Math.max(0, parseInt(s, 10)); // já em cents
   const n = Number(s.replace(/\./g, "").replace(",", "."));
   return Number.isFinite(n) ? Math.max(0, Math.round(n * 100)) : 0;
 }
@@ -141,9 +148,9 @@ function evaluateCoupon({ code, amount_cents, method }) {
   return { ok: false, reason: "cupom não encontrado" };
 }
 
-// ===== UI =====
+// ===== UI / SPA =====
 const PUB = path.join(__dirname, "public");
-app.use(express.static(PUB));
+app.use(express.static(PUB, { index: false }));
 app.get(["/", "/checkout"], (_req, res) => res.sendFile(path.join(PUB, "index.html")));
 
 // ===== App Proxy (Shopify, opcional) =====
@@ -158,81 +165,6 @@ app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
   }
 });
 
-// ===== Shopify order helper (opcional) =====
-async function createShopifyPaidOrderFromPagarmePayload(body) {
-  if (!SHOP_DOMAIN || !SHOP_TOKEN) return { created: false, reason: "shopify_not_configured" };
-
-  const charges = body?.charges || body?.data?.charges || [];
-  const charge  = charges[0] || body?.charge || {};
-  const tx      = charge?.last_transaction || {};
-  const status  = (tx?.status || charge?.status || body?.status || "").toLowerCase();
-  const isPaid = ["paid", "succeeded", "captured", "approved"].includes(status);
-  if (!isPaid) return { created: false, reason: "not_paid" };
-
-  const amountCents = Number(charge?.amount || body?.amount || 0);
-  const amountBRL   = (amountCents / 100).toFixed(2);
-  const buyerEmail  = body?.customer?.email || body?.customer?.address?.email || "cliente@exemplo.com";
-  const buyerName   = body?.customer?.name  || "Cliente Pague Leve";
-
-  let metaItemsRaw = charge?.metadata?.items ?? body?.metadata?.items ?? body?.items;
-  let parsedItems = [];
-  try {
-    if (Array.isArray(metaItemsRaw)) parsedItems = metaItemsRaw;
-    else if (typeof metaItemsRaw === "string") parsedItems = JSON.parse(metaItemsRaw);
-  } catch {}
-
-  let lineItems = [{ title: "Pedido Pague Leve", quantity: 1, price: amountBRL }];
-  if (parsedItems.length > 0) {
-    lineItems = parsedItems.map(it => ({
-      title: it.title || it.sku || "Item",
-      quantity: Number(it.qty || it.quantity || 1),
-      price: ((Number(it.price_cents ?? 0)) / 100).toFixed(2),
-      sku: it.sku || undefined,
-    }));
-  }
-
-  const noteAttrs = [];
-  const orderId = body?.id || body?.order?.id || body?.data?.id;
-  const txId    = tx?.id;
-  const statusTag = status || "";
-  if (orderId)    noteAttrs.push({ name: "pagarme_order_id", value: String(orderId) });
-  if (charge?.id) noteAttrs.push({ name: "pagarme_charge_id", value: String(charge.id) });
-  if (txId)       noteAttrs.push({ name: "pagarme_tx_id", value: String(txId) });
-  if (statusTag)  noteAttrs.push({ name: "pagarme_status", value: statusTag });
-
-  const shipping_address = body?.shipping ? {
-    first_name: buyerName,
-    address1: body.shipping.address?.line_1 || '',
-    address2: body.shipping.address?.line_2 || '',
-    city: body.shipping.address?.city || '',
-    province: body.shipping.address?.state || '',
-    country: 'Brazil',
-    country_code: 'BR',
-    zip: body.shipping.address?.zip_code || '',
-    phone: onlyDigits(body?.customer?.phones?.mobile_phone?.number || "") || undefined
-  } : undefined;
-
-  const shopifyOrder = {
-    order: {
-      email: buyerEmail,
-      send_receipt: false,
-      send_fulfillment_receipt: false,
-      financial_status: "paid",
-      currency: "BRL",
-      note: `Pagar.me order ${orderId} / charge ${charge?.id || ""}`,
-      note_attributes: noteAttrs,
-      line_items: lineItems,
-      customer: { first_name: buyerName, email: buyerEmail },
-      shipping_address,
-      tags: "pague-leve,pagarme",
-    },
-  };
-
-  const idem = `pagarme-${orderId}-${charge?.id || "nocharge"}`;
-  const r = await shopifyAdmin("orders.json", "POST", shopifyOrder, { "Idempotency-Key": idem });
-  return { created: true, shopify_order_id: r.data?.order?.id || null };
-}
-
 // ===== APIs =====
 app.get("/api/checkout-start", (req, res) => {
   const cart_id = String(req.query.cart_id || "").trim();
@@ -243,15 +175,12 @@ app.get("/api/checkout-start", (req, res) => {
   return res.status(200).json({ ok: true, step: "checkout:start", cart_id, total_cents });
 });
 
+// sempre em centavos
 app.post("/api/coupon-check", async (req, res) => {
   try {
-    const { coupon, amountBRL, method } = req.body || {};
-    const amount = Math.max(1, brlToCents(amountBRL || "0"));
-    const coup = evaluateCoupon({
-      code: coupon,
-      amount_cents: amount,
-      method: String(method || "pix").toLowerCase()
-    });
+    const { code, total_cents, method } = req.body || {};
+    const amount = Math.max(1, Number(total_cents || 0));
+    const coup = evaluateCoupon({ code, amount_cents: amount, method: String(method || "pix").toLowerCase() });
 
     if (!coup.ok) return res.json({ ok:false, reason: coup.reason || "inválido" });
 
@@ -278,11 +207,11 @@ app.post("/pay", async (req, res) => {
       return res.status(500).json({ success: false, error: "PAGARME_API_KEY ausente no .env" });
     }
 
-    const ENFORCE = String(process.env.ENFORCE_TOTAL_CENTS || "0") === "1";
+    const ENFORCE = ENFORCE_TOTAL;
 
     const {
       name, email, cpf, phone,
-      method, amountBRL,
+      method,
       card_number, exp_month, exp_year, cvv,
       installments, address, coupon,
       total_cents               // <- vem do front (carrinho/Shopify)
@@ -292,12 +221,11 @@ app.post("/pay", async (req, res) => {
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
     if (!method)          return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
 
-    // -------- VALOR ORIGINAL (prioriza carrinho; opcionalmente obrigatório) --------
+    // -------- VALOR ORIGINAL (prioriza carrinho; obrigatório com ENFORCE) --------
     let amountOriginal = 0;
     const forcedCents = Number.parseInt(total_cents, 10);
 
     if (ENFORCE) {
-      // com ENFORCE=1, total_cents é obrigatório e deve ser válido (>= R$ 1,00)
       if (!Number.isFinite(forcedCents) || forcedCents < 100) {
         return res.status(400).json({
           success: false,
@@ -305,26 +233,11 @@ app.post("/pay", async (req, res) => {
         });
       }
       amountOriginal = forcedCents;
-
-      // auditoria: se o usuário digitou algo divergente, apenas logamos; carrinho prevalece
-      try {
-        const typed = brlToCents(amountBRL || "0");
-        if (typed && Math.abs(typed - forcedCents) > 1) {
-          console.warn("💡 ENFORCE ativo — diferença ignorada (front x cart)", { typed, forcedCents });
-        }
-      } catch {}
     } else {
-      // sem ENFORCE: se veio total_cents OK, usa; senão, usa o digitado (com normalização robusta)
       if (Number.isFinite(forcedCents) && forcedCents >= 100) {
         amountOriginal = forcedCents;
-        try {
-          const typed = brlToCents(amountBRL || "0");
-          if (typed && Math.abs(typed - forcedCents) > 1) {
-            console.warn("💡 Amount mismatch ignorado (front x cart)", { typed, forcedCents });
-          }
-        } catch {}
       } else {
-        amountOriginal = Math.max(1, brlToCents(amountBRL || "1"));
+        amountOriginal = Math.max(1, brlToCents(req.body.amountBRL || "1")); // legado
       }
     }
 
@@ -534,12 +447,12 @@ app.post("/webhook", async (req, res) => {
       catch { return {}; }
     })();
 
-    const result = await createShopifyPaidOrderFromPagarmePayload(json);
-    if (result.created) console.log("✅ Pedido criado na Shopify:", result.shopify_order_id);
-    else console.log("Webhook recebido, ainda não pago.");
+    // opcional: criar pedido na Shopify quando pago
+    // const result = await createShopifyPaidOrderFromPagarmePayload(json);
+    // if (result.created) console.log("✅ Pedido criado na Shopify:", result.shopify_order_id);
     return res.sendStatus(200);
   } catch (e) {
-    console.error("webhook->shopify error:", e?.response?.data || e.message);
+    console.error("webhook error:", e?.response?.data || e.message);
     return res.sendStatus(200);
   }
 });
@@ -566,7 +479,7 @@ app.post("/refund", async (req, res) => {
   }
 });
 
-// SPA fallback
+// SPA fallback (qualquer rota não-API serve o index)
 app.get(/^\/(?!api\/|pay$|webhook$|order\/|refund$|confirm$).*/, (_req, res) => {
   res.sendFile(path.join(PUB, "index.html"));
 });

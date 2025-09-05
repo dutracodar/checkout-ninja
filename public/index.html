@@ -23,7 +23,6 @@
 </head>
 
 <body class="bg-gray-100 min-h-screen">
-  <!-- Top bar -->
   <header class="w-full bg-amber-400 text-black">
     <div class="max-w-md mx-auto px-4 py-2 flex items-center justify-between">
       <div class="flex items-center gap-2">
@@ -48,16 +47,18 @@
       <input id="cpf"   type="text" inputmode="numeric" placeholder="CPF (somente números)" required class="w-full px-4 py-2 border rounded" autocomplete="off"/>
       <input id="phone" type="text" inputmode="numeric" placeholder="Celular (DDD+número)" required class="w-full px-4 py-2 border rounded" autocomplete="tel"/>
 
-      <!-- Valor -->
+      <!-- Valor (display only, fonte = total_cents) -->
       <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Valor (R$)</label>
-        <!-- sem valor padrão! evita bug no iPhone -->
-        <input id="amount" type="text" inputmode="decimal" placeholder="Ex.: 179,00" required class="w-full px-4 py-2 border rounded"/>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Valor</label>
+        <div class="w-full px-4 py-2 border rounded bg-gray-50 flex items-center justify-between">
+          <span id="priceBRL" class="font-semibold"></span>
+          <span class="text-xs text-gray-500">definido no carrinho</span>
+        </div>
       </div>
 
       <!-- Cupom -->
       <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Cupom de desconto (%)</label>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Cupom de desconto</label>
         <div class="flex gap-2">
           <input id="coupon" type="text" placeholder="DIGITE SEU CUPOM" class="flex-1 px-4 py-2 border rounded uppercase"/>
           <button id="apply-coupon" type="button" class="px-4 bg-black text-white rounded">Aplicar</button>
@@ -108,17 +109,13 @@
         </div>
       </div>
 
-      <!-- Botão -->
       <div>
-        <button id="pay-btn" type="submit" class="w-full bg-black text-white font-bold py-2 rounded hover:opacity-90">
-          Pagar
-        </button>
+        <button id="pay-btn" type="submit" class="w-full bg-black text-white font-bold py-2 rounded hover:opacity-90">Pagar</button>
       </div>
 
       <div id="status" class="text-center text-sm text-gray-700"></div>
       <div id="extra" class="mt-4 space-y-2 text-sm"></div>
 
-      <!-- Rodapé -->
       <footer class="pt-4 text-center text-xs text-gray-500">
         <div class="flex items-center justify-center gap-4">
           <span class="inline-flex items-center gap-1">
@@ -145,69 +142,44 @@
     const couponMsg   = document.getElementById('coupon-msg');
     const applyBtn    = document.getElementById('apply-coupon');
 
-    // Flag para saber se veio total do carrinho
+    // fonte de verdade (cents)
+    function getTotalCents() {
+      const v = Number(document.getElementById('total_cents').value || 0);
+      return Number.isInteger(v) ? v : 0;
+    }
+    function setTotalCents(cents) {
+      document.getElementById('total_cents').value = String(cents);
+      document.getElementById('priceBRL').textContent =
+        new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);
+    }
+
     let HAS_TOTAL_FROM_CART = false;
 
-    // utils
-    const brl = (n)=> (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
-
-    // amount handlers
-    const amountInput = document.getElementById('amount');
-    function formatAmountInput() {
-      const raw = (amountInput.value || '').replace(/\D/g, '');
-      if (!raw) { amountInput.value = ''; return; }
-      const v = (parseInt(raw, 10) || 0) / 100;
-      amountInput.value = v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    }
-    function normalizedAmountNumber() {
-      const raw = (amountInput.value || '').trim();
-      if (/^\d{4,}$/.test(raw)) return (parseInt(raw, 10) || 0) / 100; // "16900"
-      const n = parseFloat(raw.replace(/\./g, '').replace(',', '.'));
-      return Number.isFinite(n) ? n : 0;
-    }
-    amountInput.addEventListener('blur', formatAmountInput);
-
-    // Prefill/lock com total_cents + bloqueio quando faltar
     (function securePrefillFromCart(){
       const qs = new URLSearchParams(location.search);
       const cartId = qs.get('cart_id') || '';
       const totalRaw = qs.get('total_cents');
-      const totalCents = totalRaw ? parseInt(totalRaw,10) : NaN;
+      const totalCents = totalRaw ? parseInt(totalRaw, 10) : NaN;
 
-      const cartHidden  = document.getElementById('cart_id');
-      const totalHidden = document.getElementById('total_cents');
+      if (cartId) document.getElementById('cart_id').value = cartId;
 
-      if (cartHidden && cartId) cartHidden.value = cartId;
-      if (totalHidden && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
-
-      if (!Number.isNaN(totalCents)) {
-        HAS_TOTAL_FROM_CART = true;
-        amountInput.value = (totalCents/100).toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2});
-        amountInput.readOnly = true;
-        amountInput.classList.add('bg-gray-50');
-        amountInput.title = 'Valor definido pelo carrinho da loja';
-      } else {
-        // Sem total: avisa e trava o botão
+      if (!Number.isInteger(totalCents) || totalCents <= 0) {
         statusEl.classList.add('text-red-600');
         statusEl.textContent = 'Abra o checkout a partir da loja para continuar.';
         btnPay.disabled = true;
         btnPay.classList.add("opacity-60","cursor-not-allowed");
+        return;
       }
-
-      form.addEventListener('submit', function(e){
-        if (!HAS_TOTAL_FROM_CART) {
-          e.preventDefault();
-          return false;
-        }
-        if (cartHidden && !cartHidden.value) cartHidden.value = cartId || '';
-        if (totalHidden && !totalHidden.value && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
-      });
+      HAS_TOTAL_FROM_CART = true;
+      setTotalCents(totalCents);
     })();
 
-    // parcelas
+    function brl(n){ return (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
+
     function buildInstallments(){
       if (!installmentsEl) return;
-      const total = normalizedAmountNumber();
+      const cents = getTotalCents();
+      const total = cents / 100;
       let html = '';
       for (let n = 1; n <= 12; n++){
         const per = total / n;
@@ -217,12 +189,9 @@
       installmentsEl.innerHTML = html;
     }
     buildInstallments();
-    amountInput.addEventListener('input', ()=>{ if(!amountInput.readOnly) buildInstallments(); });
 
-    // copiar
     async function copy(text){ try{ await navigator.clipboard.writeText(text); alert('Copiado!'); }catch{ alert('Não foi possível copiar.'); } }
 
-    // renders
     function renderPix(pix){
       let html = '<div class="p-3 border rounded"><div class="font-semibold mb-1">Pix gerado:</div>';
       if (pix.qr_code_base64) html += `<img class="mx-auto" alt="QR Pix" src="data:image/png;base64,${pix.qr_code_base64}" />`;
@@ -252,54 +221,58 @@
     }
 
     // máscaras simples
-    const cpfEl = document.getElementById('cpf');
-    cpfEl.addEventListener('input', ()=>{
-      let v = cpfEl.value.replace(/\D/g,'').slice(0,11);
-      v = v.replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d{1,2})$/,'$1-$2');
-      cpfEl.value = v;
-    });
-    const phoneEl = document.getElementById('phone');
-    phoneEl.addEventListener('input', ()=>{
-      let v = phoneEl.value.replace(/\D/g,'').slice(0,11);
-      if (v.length>10) v=v.replace(/(\d{2})(\d{5})(\d{4})/,'$1 $2-$3');
-      else v=v.replace(/(\d{2})(\d{4})(\d{0,4})/,'$1 $2-$3');
-      phoneEl.value = v.trim();
-    });
-    const cardEl = document.getElementById('card_number');
-    if (cardEl) cardEl.addEventListener('input', ()=>{
-      let v = cardEl.value.replace(/\D/g,'').slice(0,16);
-      v = v.replace(/(\d{4})(?=\d)/g,'$1 ');
-      cardEl.value = v;
-    });
+    (function masks(){
+      const cpfEl = document.getElementById('cpf');
+      cpfEl.addEventListener('input', ()=>{
+        let v = cpfEl.value.replace(/\D/g,'').slice(0,11);
+        v = v.replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d{1,2})$/,'$1-$2');
+        cpfEl.value = v;
+      });
+      const phoneEl = document.getElementById('phone');
+      phoneEl.addEventListener('input', ()=>{
+        let v = phoneEl.value.replace(/\D/g,'').slice(0,11);
+        if (v.length>10) v=v.replace(/(\d{2})(\d{5})(\d{4})/,'$1 $2-$3');
+        else v=v.replace(/(\d{2})(\d{4})(\d{0,4})/,'$1 $2-$3');
+        phoneEl.value = v.trim();
+      });
+      const cardEl = document.getElementById('card_number');
+      if (cardEl) cardEl.addEventListener('input', ()=>{
+        let v = cardEl.value.replace(/\D/g,'').slice(0,16);
+        v = v.replace(/(\d{4})(?=\d)/g,'$1 ');
+        cardEl.value = v;
+      });
+    })();
 
     // CEP + ViaCEP
-    const cepEl = document.getElementById('cep');
-    const cepInfo = document.getElementById('cep-info');
-    let cepLoading = false;
-    async function fillAddressFromCep(cepRaw) {
-      const cep = String(cepRaw || '').replace(/\D/g, '');
-      if (cep.length !== 8 || cepLoading) return;
-      cepLoading = true;
-      try {
-        cepInfo.textContent = '🔎 Buscando endereço...';
-        const resp = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-        const data = await resp.json();
-        if (data?.erro) { cepInfo.textContent = '❌ CEP não encontrado'; return; }
-        document.getElementById("address1").value     = data.logradouro || "";
-        document.getElementById("neighborhood").value = data.bairro || "";
-        document.getElementById("city").value         = data.localidade || "";
-        document.getElementById("state").value        = (data.uf || "").toUpperCase();
-        cepInfo.textContent = `✅ ${data.localidade} / ${data.uf}`;
-      } catch { cepInfo.textContent = '⚠️ Erro ao buscar CEP'; }
-      finally { cepLoading = false; }
-    }
-    cepEl.addEventListener('input', ()=>{
-      let v = cepEl.value.replace(/\D/g,'').slice(0,8);
-      if (v.length>5) v=v.replace(/(\d{5})(\d{0,3})/,'$1-$2');
-      cepEl.value = v;
-      if (v.replace(/\D/g,'').length === 8) fillAddressFromCep(v);
-    });
-    cepEl.addEventListener('blur', () => fillAddressFromCep(cepEl.value));
+    (function cep(){
+      const cepEl = document.getElementById('cep');
+      const cepInfo = document.getElementById('cep-info');
+      let loading = false;
+      async function fill(cepRaw) {
+        const cep = String(cepRaw || '').replace(/\D/g, '');
+        if (cep.length !== 8 || loading) return;
+        loading = true;
+        try {
+          cepInfo.textContent = '🔎 Buscando endereço...';
+          const resp = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+          const data = await resp.json();
+          if (data?.erro) { cepInfo.textContent = '❌ CEP não encontrado'; return; }
+          document.getElementById("address1").value     = data.logradouro || "";
+          document.getElementById("neighborhood").value = data.bairro || "";
+          document.getElementById("city").value         = data.localidade || "";
+          document.getElementById("state").value        = (data.uf || "").toUpperCase();
+          cepInfo.textContent = `✅ ${data.localidade} / ${data.uf}`;
+        } catch { cepInfo.textContent = '⚠️ Erro ao buscar CEP'; }
+        finally { loading = false; }
+      }
+      cepEl.addEventListener('input', ()=>{
+        let v = cepEl.value.replace(/\D/g,'').slice(0,8);
+        if (v.length>5) v=v.replace(/(\d{5})(\d{0,3})/,'$1-$2');
+        cepEl.value = v;
+        if (v.replace(/\D/g,'').length === 8) fill(v);
+      });
+      cepEl.addEventListener('blur', () => fill(cepEl.value));
+    })();
 
     // alternar cartão
     document.querySelectorAll('input[name="pmethod"]').forEach(r=>{
@@ -309,7 +282,7 @@
       });
     });
 
-    // Cupom preview
+    // Cupom preview (sempre em cents)
     applyBtn.addEventListener('click', async ()=>{
       couponMsg.textContent = '';
       const code = couponInput.value.trim();
@@ -317,10 +290,14 @@
       try {
         const r = await fetch('/api/coupon-check', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ coupon: code, amountBRL: amountInput.value, method: document.querySelector('input[name="pmethod"]:checked').value })
+          body: JSON.stringify({
+            code,
+            total_cents: getTotalCents(),
+            method: document.querySelector('input[name="pmethod"]:checked').value
+          })
         });
         const j = await r.json();
-        if (!j.ok) {
+        if (!j?.ok) {
           couponMsg.className='text-sm mt-1 text-red-600';
           couponMsg.textContent = 'Cupom inválido.';
           return;
@@ -337,20 +314,15 @@
     // submit
     form.addEventListener('submit', async (e)=>{
       e.preventDefault();
-      try { fbq('track','InitiateCheckout',{ value: normalizedAmountNumber(), currency:'BRL' }); } catch {}
+      const cents = getTotalCents();
+      if (!HAS_TOTAL_FROM_CART || cents <= 0) return;
 
-      if (!HAS_TOTAL_FROM_CART) { return; } // segurança extra no front
-      if (cepLoading) { statusEl.textContent = '⏳ Aguarde terminar a busca do CEP...'; return; }
-
-      const nAmt = normalizedAmountNumber();
-      if (nAmt <= 0 || nAmt > 100000) { statusEl.textContent = 'Valor inválido.'; return; }
+      try { fbq('track','InitiateCheckout',{ value: cents/100, currency:'BRL' }); } catch {}
 
       statusEl.textContent = 'Processando...';
       extraEl.innerHTML = '';
       btnPay.disabled = true;
       btnPay.classList.add("opacity-60","cursor-not-allowed");
-
-      const totalHiddenVal = Number(document.getElementById('total_cents').value || 0) || null;
 
       const payload = {
         name:  document.getElementById('name').value.trim(),
@@ -358,10 +330,9 @@
         cpf:   document.getElementById('cpf').value.replace(/\D/g,''),
         phone: document.getElementById('phone').value.replace(/\D/g,''),
         method: document.querySelector('input[name="pmethod"]:checked').value,
-        amountBRL: String(nAmt),
 
         cart_id: document.getElementById('cart_id').value || null,
-        total_cents: totalHiddenVal, // <- number ou null
+        total_cents: cents, // fonte de verdade
 
         coupon: couponInput.value.trim() || null,
 
@@ -393,8 +364,8 @@
 
         const m = payload.method;
         try {
-          const finalCents = Number(result?.data?.final_amount_cents ?? result?.data?.original_amount_cents ?? 0);
-          const val = (finalCents/100) || nAmt;
+          const finalCents = Number(result?.data?.final_amount_cents ?? result?.data?.original_amount_cents ?? cents);
+          const val = finalCents/100;
           if (res.ok && (m==='pix' || m==='boleto')) fbq('track','AddPaymentInfo',{ value: val, currency:'BRL', payment_method: m });
           if (m === 'card') {
             const st = (result?.card?.status || result?.data?.charge_status || '').toLowerCase();
@@ -416,14 +387,13 @@
       }
     });
 
-    // Prefill de QS (sem mexer no valor se já estiver travado)
+    // Prefill de QS (dados básicos)
     (function prefillFromQS(){
       const p = new URLSearchParams(location.search);
       if (p.has('name'))  document.getElementById('name').value = p.get('name');
       if (p.has('email')) document.getElementById('email').value = p.get('email');
       if (p.has('cpf'))   document.getElementById('cpf').value = p.get('cpf');
       if (p.has('phone')) document.getElementById('phone').value = p.get('phone');
-      if (p.has('amount') && !amountInput.readOnly) amountInput.value = p.get('amount');
       if (p.has('method')){
         const m = p.get('method');
         const radio = document.querySelector(`input[name="pmethod"][value="${m}"]`);
