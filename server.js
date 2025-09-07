@@ -11,6 +11,7 @@ const path = require("path");
 require("dotenv").config();
 
 const app = express();
+app.disable("x-powered-by");
 app.set("trust proxy", 1);
 
 // ===== Feature flags / env =====
@@ -31,6 +32,36 @@ const WH_SECRET = process.env.PAGARME_WEBHOOK_SECRET || "";
 const WH_HEADER = (process.env.PAGARME_WEBHOOK_HEADER || "").toLowerCase();
 const WH_ALGO   = (process.env.PAGARME_WEBHOOK_ALGO || "sha256").toLowerCase();
 
+// ---------- Segurança & infra ----------
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(compression());
+app.use(morgan("combined"));
+
+// CORS (aceita *.myshopify.com e seus domínios)
+const ALLOW_ORIGINS = [
+  "https://pagueleve.com",
+  "https://checkout.pagueleve.com"
+];
+const ORIGIN_REGEX = [/^https:\/\/([a-z0-9-]+\.)*myshopify\.com$/i];
+
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);
+    if (ALLOW_ORIGINS.includes(origin) || ORIGIN_REGEX.some(r => r.test(origin))) {
+      return cb(null, true);
+    }
+    return cb(new Error("CORS blocked"), false);
+  }
+}));
+app.options("*", cors());
+
+app.use(rateLimit({
+  windowMs: 60_000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false
+}));
+
 // raw body só no webhook
 app.use("/webhook", express.raw({ type: "*/*" }));
 // json no resto
@@ -40,18 +71,13 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ extended: true }));
 
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(compression());
-app.use(morgan("combined"));
-// CORS mais seguro (ajuste os domínios da sua loja)
-app.use(cors({
-  origin: [
-    "https://pagueleve.com",
-    "https://checkout.pagueleve.com",
-    "https://*.myshopify.com"
-  ]
-}));
-app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
+// Não deixe respostas de API em cache
+app.use((req, res, next) => {
+  if (req.method !== "GET" || req.path.startsWith("/api") || req.path === "/pay") {
+    res.set("Cache-Control", "no-store");
+  }
+  next();
+});
 
 // ===== helpers =====
 async function shopifyAdmin(pathApi, method = "GET", body = null, extraHeaders = {}) {
@@ -150,8 +176,26 @@ function evaluateCoupon({ code, amount_cents, method }) {
 
 // ===== UI / SPA =====
 const PUB = path.join(__dirname, "public");
-app.use(express.static(PUB, { index: false }));
-app.get(["/", "/checkout"], (_req, res) => res.sendFile(path.join(PUB, "index.html")));
+
+// estáticos: cache longo para assets, NO-STORE para HTML
+app.use(express.static(PUB, {
+  index: false,
+  etag: true,
+  lastModified: true,
+  setHeaders(res, filePath) {
+    const isHtml = /\.html?$/i.test(filePath);
+    if (isHtml || path.basename(filePath) === "index.html") {
+      res.setHeader("Cache-Control", "no-store");
+    } else {
+      res.setHeader("Cache-Control", "public, max-age=2592000, immutable"); // 30d
+    }
+  }
+}));
+
+app.get(["/", "/checkout"], (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(PUB, "index.html"));
+});
 
 // ===== App Proxy (Shopify, opcional) =====
 app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
@@ -214,7 +258,7 @@ app.post("/pay", async (req, res) => {
       method,
       card_number, exp_month, exp_year, cvv,
       installments, address, coupon,
-      total_cents               // <- vem do front (carrinho/Shopify)
+      total_cents
     } = req.body || {};
 
     // validações básicas
@@ -267,16 +311,17 @@ app.post("/pay", async (req, res) => {
     }
 
     // documentos & contato
-    const cpfDigits = onlyDigits(cpf);
+    const only = onlyDigits;
+    const cpfDigits = only(cpf);
     if (cpfDigits.length !== 11) return res.status(400).json({ success: false, error: "CPF inválido. Use 11 dígitos." });
 
-    const phoneDigits = onlyDigits(phone || "");
+    const phoneDigits = only(phone || "");
     if (phoneDigits.length < 10 || phoneDigits.length > 11)
       return res.status(400).json({ success: false, error: "Celular inválido. Use DDD + número (10 ou 11 dígitos)." });
     const area_code = phoneDigits.slice(0, 2);
     const phoneNumber = phoneDigits.slice(2);
 
-    const cepDigits = onlyDigits(address?.cep || "");
+    const cepDigits = only(address?.cep || "");
     if (address && cepDigits && cepDigits.length !== 8) {
       return res.status(400).json({ success:false, error:"CEP inválido (8 dígitos)." });
     }
@@ -481,6 +526,7 @@ app.post("/refund", async (req, res) => {
 
 // SPA fallback (qualquer rota não-API serve o index)
 app.get(/^\/(?!api\/|pay$|webhook$|order\/|refund$|confirm$).*/, (_req, res) => {
+  res.set("Cache-Control", "no-store");
   res.sendFile(path.join(PUB, "index.html"));
 });
 app.use("/api", (_req, res) => res.status(404).json({ ok: false, error: "Not found" }));

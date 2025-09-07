@@ -13,8 +13,7 @@
   n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;
   t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,
   document,'script','https://connect.facebook.net/en_US/fbevents.js');
-  fbq('init','750766562712140');
-  fbq('track','PageView');
+  fbq('init','750766562712140'); fbq('track','PageView');
   </script>
   <noscript>
     <img height="1" width="1" style="display:none"
@@ -130,6 +129,35 @@
       </footer>
     </form>
   </main>
+
+  <!-- PATCH anti-bfcache (Safari/iOS): rehidrata valor/cart_id ao voltar/avançar -->
+  <script>
+    window.addEventListener('pageshow', function (evt) {
+      if (!evt.persisted) return; // só quando veio do cache de histórico
+      try {
+        const qs = new URLSearchParams(location.search);
+        const totalRaw = qs.get('total_cents');
+        const totalCents = totalRaw ? parseInt(totalRaw, 10) : NaN;
+        const cartId = qs.get('cart_id') || '';
+
+        if (!Number.isFinite(totalCents) || totalCents < 100) {
+          location.reload(); // estado inválido? força recálculo
+          return;
+        }
+
+        const tot = document.getElementById('total_cents');
+        const cart = document.getElementById('cart_id');
+        const price = document.getElementById('priceBRL');
+
+        if (tot)  tot.value = String(totalCents);
+        if (cart) cart.value = cartId;
+        if (price) price.textContent =
+          new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(totalCents/100);
+      } catch {
+        location.reload();
+      }
+    }, { passive: true });
+  </script>
 
   <script>
     const form = document.getElementById('checkout-form');
@@ -258,7 +286,7 @@
           const data = await resp.json();
           if (data?.erro) { cepInfo.textContent = '❌ CEP não encontrado'; return; }
           document.getElementById("address1").value     = data.logradouro || "";
-          document.getElementById("neighborhood").value = data.bairro || "";
+          document.getElementById("neighborhood").value = data.bairro || ""
           document.getElementById("city").value         = data.localidade || "";
           document.getElementById("state").value        = (data.uf || "").toUpperCase();
           cepInfo.textContent = `✅ ${data.localidade} / ${data.uf}`;
@@ -332,7 +360,7 @@
         method: document.querySelector('input[name="pmethod"]:checked').value,
 
         cart_id: document.getElementById('cart_id').value || null,
-        total_cents: cents, // fonte de verdade
+        total_cents: cents,
 
         coupon: couponInput.value.trim() || null,
 
