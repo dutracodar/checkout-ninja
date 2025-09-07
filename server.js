@@ -11,7 +11,6 @@ const path = require("path");
 require("dotenv").config();
 
 const app = express();
-app.disable("x-powered-by");
 app.set("trust proxy", 1);
 
 // ===== Feature flags / env =====
@@ -32,36 +31,6 @@ const WH_SECRET = process.env.PAGARME_WEBHOOK_SECRET || "";
 const WH_HEADER = (process.env.PAGARME_WEBHOOK_HEADER || "").toLowerCase();
 const WH_ALGO   = (process.env.PAGARME_WEBHOOK_ALGO || "sha256").toLowerCase();
 
-// ---------- Segurança & infra ----------
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(compression());
-app.use(morgan("combined"));
-
-// CORS (aceita *.myshopify.com e seus domínios)
-const ALLOW_ORIGINS = [
-  "https://pagueleve.com",
-  "https://checkout.pagueleve.com"
-];
-const ORIGIN_REGEX = [/^https:\/\/([a-z0-9-]+\.)*myshopify\.com$/i];
-
-app.use(cors({
-  origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    if (ALLOW_ORIGINS.includes(origin) || ORIGIN_REGEX.some(r => r.test(origin))) {
-      return cb(null, true);
-    }
-    return cb(new Error("CORS blocked"), false);
-  }
-}));
-app.options("*", cors());
-
-app.use(rateLimit({
-  windowMs: 60_000,
-  max: 120,
-  standardHeaders: true,
-  legacyHeaders: false
-}));
-
 // raw body só no webhook
 app.use("/webhook", express.raw({ type: "*/*" }));
 // json no resto
@@ -71,10 +40,28 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ extended: true }));
 
-// Não deixe respostas de API em cache
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(compression());
+app.use(morgan("combined"));
+
+// CORS (ajuste os domínios da sua loja)
+app.use(cors({
+  origin: [
+    "https://pagueleve.com",
+    "https://checkout.pagueleve.com",
+    "https://*.myshopify.com"
+  ]
+}));
+
+app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
+
+// ===== NO-CACHE para HTML (ajuda a não servir HTML antigo; BFCache é do browser) =====
 app.use((req, res, next) => {
-  if (req.method !== "GET" || req.path.startsWith("/api") || req.path === "/pay") {
-    res.set("Cache-Control", "no-store");
+  const wantsHTML = req.method === 'GET' && (req.headers.accept || '').includes('text/html');
+  if (wantsHTML) {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
   }
   next();
 });
@@ -176,26 +163,8 @@ function evaluateCoupon({ code, amount_cents, method }) {
 
 // ===== UI / SPA =====
 const PUB = path.join(__dirname, "public");
-
-// estáticos: cache longo para assets, NO-STORE para HTML
-app.use(express.static(PUB, {
-  index: false,
-  etag: true,
-  lastModified: true,
-  setHeaders(res, filePath) {
-    const isHtml = /\.html?$/i.test(filePath);
-    if (isHtml || path.basename(filePath) === "index.html") {
-      res.setHeader("Cache-Control", "no-store");
-    } else {
-      res.setHeader("Cache-Control", "public, max-age=2592000, immutable"); // 30d
-    }
-  }
-}));
-
-app.get(["/", "/checkout"], (_req, res) => {
-  res.set("Cache-Control", "no-store");
-  res.sendFile(path.join(PUB, "index.html"));
-});
+app.use(express.static(PUB, { index: false }));
+app.get(["/", "/checkout"], (_req, res) => res.sendFile(path.join(PUB, "index.html")));
 
 // ===== App Proxy (Shopify, opcional) =====
 app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
@@ -261,11 +230,10 @@ app.post("/pay", async (req, res) => {
       total_cents
     } = req.body || {};
 
-    // validações básicas
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
     if (!method)          return res.status(400).json({ success: false, error: "Informe a forma de pagamento." });
 
-    // -------- VALOR ORIGINAL (prioriza carrinho; obrigatório com ENFORCE) --------
+    // Valor original (sempre do carrinho)
     let amountOriginal = 0;
     const forcedCents = Number.parseInt(total_cents, 10);
 
@@ -278,14 +246,12 @@ app.post("/pay", async (req, res) => {
       }
       amountOriginal = forcedCents;
     } else {
-      if (Number.isFinite(forcedCents) && forcedCents >= 100) {
-        amountOriginal = forcedCents;
-      } else {
-        amountOriginal = Math.max(1, brlToCents(req.body.amountBRL || "1")); // legado
-      }
+      amountOriginal = Number.isFinite(forcedCents) && forcedCents >= 100
+        ? forcedCents
+        : Math.max(1, brlToCents(req.body.amountBRL || "1"));
     }
 
-    // -------- CUPOM --------
+    // Cupom
     let discountValue = 0;
     let pct = 0;
     if (coupon) {
@@ -300,7 +266,6 @@ app.post("/pay", async (req, res) => {
     }
     const amountFinal = Math.max(1, amountOriginal - discountValue);
 
-    // mínimos (opcionais)
     if (method === "card") {
       const parc = Math.max(1, Number(installments || 1));
       const per  = Math.floor(amountFinal / parc);
@@ -311,22 +276,22 @@ app.post("/pay", async (req, res) => {
     }
 
     // documentos & contato
-    const only = onlyDigits;
-    const cpfDigits = only(cpf);
+    const onlyDigits = (s)=> (s? String(s).replace(/\D/g,'') : '');
+    const cpfDigits = onlyDigits(cpf);
     if (cpfDigits.length !== 11) return res.status(400).json({ success: false, error: "CPF inválido. Use 11 dígitos." });
 
-    const phoneDigits = only(phone || "");
+    const phoneDigits = onlyDigits(phone || "");
     if (phoneDigits.length < 10 || phoneDigits.length > 11)
       return res.status(400).json({ success: false, error: "Celular inválido. Use DDD + número (10 ou 11 dígitos)." });
     const area_code = phoneDigits.slice(0, 2);
     const phoneNumber = phoneDigits.slice(2);
 
-    const cepDigits = only(address?.cep || "");
+    const cepDigits = onlyDigits(address?.cep || "");
     if (address && cepDigits && cepDigits.length !== 8) {
       return res.status(400).json({ success:false, error:"CEP inválido (8 dígitos)." });
     }
 
-    const ip = clientIp(req);
+    const ip = (req.headers["x-forwarded-for"] || req.ip || req.socket.remoteAddress || "").toString().split(",")[0].trim();
     const ua = req.headers["user-agent"] || "";
 
     const customer = {
@@ -524,10 +489,10 @@ app.post("/refund", async (req, res) => {
   }
 });
 
-// SPA fallback (qualquer rota não-API serve o index)
+// SPA fallback
+const PUB_DIR = path.join(__dirname, "public");
 app.get(/^\/(?!api\/|pay$|webhook$|order\/|refund$|confirm$).*/, (_req, res) => {
-  res.set("Cache-Control", "no-store");
-  res.sendFile(path.join(PUB, "index.html"));
+  res.sendFile(path.join(PUB_DIR, "index.html"));
 });
 app.use("/api", (_req, res) => res.status(404).json({ ok: false, error: "Not found" }));
 

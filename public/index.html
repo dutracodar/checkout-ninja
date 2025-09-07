@@ -13,7 +13,8 @@
   n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;
   t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,
   document,'script','https://connect.facebook.net/en_US/fbevents.js');
-  fbq('init','750766562712140'); fbq('track','PageView');
+  fbq('init','750766562712140');
+  fbq('track','PageView');
   </script>
   <noscript>
     <img height="1" width="1" style="display:none"
@@ -130,35 +131,6 @@
     </form>
   </main>
 
-  <!-- PATCH anti-bfcache (Safari/iOS): rehidrata valor/cart_id ao voltar/avançar -->
-  <script>
-    window.addEventListener('pageshow', function (evt) {
-      if (!evt.persisted) return; // só quando veio do cache de histórico
-      try {
-        const qs = new URLSearchParams(location.search);
-        const totalRaw = qs.get('total_cents');
-        const totalCents = totalRaw ? parseInt(totalRaw, 10) : NaN;
-        const cartId = qs.get('cart_id') || '';
-
-        if (!Number.isFinite(totalCents) || totalCents < 100) {
-          location.reload(); // estado inválido? força recálculo
-          return;
-        }
-
-        const tot = document.getElementById('total_cents');
-        const cart = document.getElementById('cart_id');
-        const price = document.getElementById('priceBRL');
-
-        if (tot)  tot.value = String(totalCents);
-        if (cart) cart.value = cartId;
-        if (price) price.textContent =
-          new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(totalCents/100);
-      } catch {
-        location.reload();
-      }
-    }, { passive: true });
-  </script>
-
   <script>
     const form = document.getElementById('checkout-form');
     const statusEl = document.getElementById('status');
@@ -170,7 +142,7 @@
     const couponMsg   = document.getElementById('coupon-msg');
     const applyBtn    = document.getElementById('apply-coupon');
 
-    // fonte de verdade (cents)
+    // ==== fonte de verdade (centavos) ====
     function getTotalCents() {
       const v = Number(document.getElementById('total_cents').value || 0);
       return Number.isInteger(v) ? v : 0;
@@ -180,30 +152,9 @@
       document.getElementById('priceBRL').textContent =
         new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);
     }
-
     let HAS_TOTAL_FROM_CART = false;
 
-    (function securePrefillFromCart(){
-      const qs = new URLSearchParams(location.search);
-      const cartId = qs.get('cart_id') || '';
-      const totalRaw = qs.get('total_cents');
-      const totalCents = totalRaw ? parseInt(totalRaw, 10) : NaN;
-
-      if (cartId) document.getElementById('cart_id').value = cartId;
-
-      if (!Number.isInteger(totalCents) || totalCents <= 0) {
-        statusEl.classList.add('text-red-600');
-        statusEl.textContent = 'Abra o checkout a partir da loja para continuar.';
-        btnPay.disabled = true;
-        btnPay.classList.add("opacity-60","cursor-not-allowed");
-        return;
-      }
-      HAS_TOTAL_FROM_CART = true;
-      setTotalCents(totalCents);
-    })();
-
-    function brl(n){ return (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
-
+    // ==== Rehidratação anti-BFCache (voltar/avançar) ====
     function buildInstallments(){
       if (!installmentsEl) return;
       const cents = getTotalCents();
@@ -216,7 +167,40 @@
       }
       installmentsEl.innerHTML = html;
     }
-    buildInstallments();
+    function rehydrateFromQueryOrBlock() {
+      const qs = new URLSearchParams(location.search);
+      const cartId = qs.get('cart_id') || '';
+      const totalRaw = qs.get('total_cents');
+      const totalCents = totalRaw ? parseInt(totalRaw, 10) : NaN;
+
+      document.getElementById('cart_id').value = cartId;
+
+      if (Number.isInteger(totalCents) && totalCents > 0) {
+        HAS_TOTAL_FROM_CART = true;
+        setTotalCents(totalCents);
+        buildInstallments();
+        statusEl.textContent = '';
+        statusEl.classList.remove('text-red-600');
+        btnPay.disabled = false;
+        btnPay.classList.remove('opacity-60','cursor-not-allowed');
+      } else {
+        HAS_TOTAL_FROM_CART = false;
+        setTotalCents(0);
+        buildInstallments();
+        document.getElementById('priceBRL').textContent = '—';
+        statusEl.classList.add('text-red-600');
+        statusEl.textContent = 'Abra o checkout a partir da loja para continuar.';
+        btnPay.disabled = true;
+        btnPay.classList.add('opacity-60','cursor-not-allowed');
+      }
+    }
+    // 1) no load normal
+    rehydrateFromQueryOrBlock();
+    // 2) quando a página vem do BFCache (voltar/avançar)
+    window.addEventListener('pageshow', (e)=>{ if (e.persisted) rehydrateFromQueryOrBlock(); });
+    window.addEventListener('popstate', rehydrateFromQueryOrBlock);
+
+    function brl(n){ return (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
 
     async function copy(text){ try{ await navigator.clipboard.writeText(text); alert('Copiado!'); }catch{ alert('Não foi possível copiar.'); } }
 
@@ -286,7 +270,7 @@
           const data = await resp.json();
           if (data?.erro) { cepInfo.textContent = '❌ CEP não encontrado'; return; }
           document.getElementById("address1").value     = data.logradouro || "";
-          document.getElementById("neighborhood").value = data.bairro || ""
+          document.getElementById("neighborhood").value = data.bairro || "";
           document.getElementById("city").value         = data.localidade || "";
           document.getElementById("state").value        = (data.uf || "").toUpperCase();
           cepInfo.textContent = `✅ ${data.localidade} / ${data.uf}`;
@@ -360,7 +344,7 @@
         method: document.querySelector('input[name="pmethod"]:checked').value,
 
         cart_id: document.getElementById('cart_id').value || null,
-        total_cents: cents,
+        total_cents: cents, // fonte de verdade
 
         coupon: couponInput.value.trim() || null,
 
