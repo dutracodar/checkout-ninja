@@ -18,19 +18,34 @@ const ENFORCE_TOTAL =
   String(process.env.ENFORCE_TOTAL_CENTS || "").toLowerCase() === "1" ||
   String(process.env.ENFORCE_TOTAL_CENTS || "").toLowerCase() === "true";
 
+const NODE_ENV = process.env.NODE_ENV || "production";
+const CHECKOUT_BASE = process.env.CHECKOUT_BASE_URL || "https://checkout.pagueleve.com";
+
+// Pagar.me / pagamentos
+const STATEMENT_DESCRIPTOR = (process.env.STATEMENT_DESCRIPTOR || "PAGUELEVE").slice(0, 13);
+const PIX_EXPIRES_IN = Math.max(60, parseInt(process.env.PIX_EXPIRES_IN || "1800", 10)); // >= 60s
+const BOLETO_DAYS = Math.max(1, parseInt(process.env.BOLETO_DAYS || "3", 10)); // >= 1 dia
+
+// Rate limits
+const RATE_LIMIT_GLOBAL = Math.max(60, parseInt(process.env.RATE_LIMIT_GLOBAL || "300", 10));
+const RATE_LIMIT_PAY = Math.max(30, parseInt(process.env.RATE_LIMIT_PAY || "60", 10));
+
+// Logs
+const LOG_FORMAT = process.env.LOG_FORMAT || "combined";
+
 // ===== Shopify (opcional) =====
 const SHOP_DOMAIN   = process.env.SHOPIFY_STORE_DOMAIN || "";
 const SHOP_VERSION  = process.env.SHOPIFY_API_VERSION || "2024-04";
 const SHOP_TOKEN    = process.env.SHOPIFY_API_TOKEN || "";
 const PROXY_PREFIX  = process.env.APP_PROXY_PREFIX  || "apps/cobrax";
 const PROXY_SUBPATH = process.env.APP_PROXY_SUBPATH || "checkout";
-const CHECKOUT_BASE = process.env.CHECKOUT_BASE_URL || "https://checkout.pagueleve.com";
 
 // ===== Webhook signing (opcional) =====
 const WH_SECRET = process.env.PAGARME_WEBHOOK_SECRET || "";
 const WH_HEADER = (process.env.PAGARME_WEBHOOK_HEADER || "").toLowerCase();
 const WH_ALGO   = (process.env.PAGARME_WEBHOOK_ALGO || "sha256").toLowerCase();
 
+// ===== Body parsers =====
 // raw body só no webhook
 app.use("/webhook", express.raw({ type: "*/*" }));
 // json no resto
@@ -40,22 +55,43 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ extended: true }));
 
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(compression());
-app.use(morgan("combined"));
-
-// CORS (ajuste os domínios da sua loja)
-app.use(cors({
-  origin: [
-    "https://pagueleve.com",
-    "https://checkout.pagueleve.com",
-    "https://*.myshopify.com"
-  ]
+// ===== Segurança / Perf / Logs =====
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
+app.use(compression());
+app.use(morgan(LOG_FORMAT));
 
-app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
+// ===== CORS — allowlist seguro (Shopify + seus domínios) =====
+const DEFAULT_ALLOWED = ['https://pagueleve.com','https://checkout.pagueleve.com'];
+const EXTRA_ALLOWED = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+const ALLOWED_ORIGINS = [...new Set([...DEFAULT_ALLOWED, ...EXTRA_ALLOWED])];
 
-// ===== NO-CACHE para HTML (ajuda a não servir HTML antigo; BFCache é do browser) =====
+const corsOpts = {
+  origin(origin, cb) {
+    if (!origin) return cb(null, true); // curl / server-to-server
+    try {
+      const u = new URL(origin);
+      const ok =
+        ALLOWED_ORIGINS.includes(origin) ||
+        /\.myshopify\.com$/.test(u.hostname);
+      return cb(ok ? null : new Error('CORS blocked'), ok);
+    } catch {
+      return cb(new Error('CORS blocked'), false);
+    }
+  },
+  credentials: false
+};
+app.use(cors(corsOpts));
+
+// ===== Rate limits =====
+app.use(rateLimit({ windowMs: 60_000, max: RATE_LIMIT_GLOBAL, standardHeaders: true, legacyHeaders: false }));
+
+// ===== NO-CACHE para HTML (evitar HTML antigo) =====
 app.use((req, res, next) => {
   const wantsHTML = req.method === 'GET' && (req.headers.accept || '').includes('text/html');
   if (wantsHTML) {
@@ -66,7 +102,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===== helpers =====
+// ===== Helpers =====
 async function shopifyAdmin(pathApi, method = "GET", body = null, extraHeaders = {}) {
   if (!SHOP_DOMAIN || !SHOP_TOKEN) throw new Error("Shopify não configurado");
   const url = `https://${SHOP_DOMAIN}/admin/api/${SHOP_VERSION}/${pathApi}`;
@@ -128,37 +164,23 @@ async function waitChargeReady(orderId, kind){
   return { order, charge: order.charges?.[0] || null, tx: order.charges?.[0]?.last_transaction || null };
 }
 
-// ===== Coupons (fonte da verdade no back) =====
-function evaluateCoupon({ code, amount_cents, method }) {
-  const coupon = String(code || "").trim().toUpperCase();
-  const m = String(method || "pix").toLowerCase();
-  const amt = Math.max(0, Number(amount_cents || 0));
-
-  if (!coupon) return { ok: false, reason: "cupom vazio" };
-  if (amt < 100) return { ok: false, reason: "valor muito baixo" };
-
-  if (coupon === "NATAL10") {
-    const pct = 10;
-    return { ok: true, pct, discount_cents: Math.floor((pct/100)*amt), label: "10% OFF" };
-  }
-  if (coupon === "PIX5") {
-    if (m !== "pix") return { ok:false, reason: "válido somente para Pix" };
-    const pct = 5;
-    return { ok: true, pct, discount_cents: Math.floor((pct/100)*amt), label: "5% OFF (Pix)" };
-  }
-  if (coupon === "PRIMEIRA") {
-    const pct = 15;               // 15% com teto de R$30
-    const cap = 3000;
-    const bruto = Math.floor((pct/100)*amt);
-    return { ok:true, pct, discount_cents: Math.min(bruto, cap), label: "15% OFF (até R$30)" };
-  }
-  if (coupon === "DESCONTO100") {
-    const discount_cents = Math.min(amt - 100, 1000000); // deixa final ~R$1
-    if (discount_cents <= 0) return { ok:false, reason:"valor já mínimo" };
-    return { ok:true, pct: Math.round(100*discount_cents/amt), discount_cents, label:"valor simbólico" };
-  }
-
-  return { ok: false, reason: "cupom não encontrado" };
+// ==== Auditoria opcional de items_b64 (apenas visual) ====
+function safeDecodeItemsB64(b64url) {
+  if (!b64url) return [];
+  try {
+    const b64 = String(b64url).replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : '';
+    const raw = Buffer.from(b64 + pad, 'base64').toString('utf8');
+    return JSON.parse(raw);
+  } catch { return []; }
+}
+function subtotalFromItems(items = []) {
+  return items.reduce((acc, it) => {
+    const q = Number(it?.quantity || 1);
+    const unit = Number(it?.price_cents || 0);
+    const line = Number(it?.line_price_cents || (unit * q));
+    return acc + (Number.isFinite(line) ? line : 0);
+  }, 0);
 }
 
 // ===== UI / SPA =====
@@ -214,7 +236,8 @@ app.post("/api/coupon-check", async (req, res) => {
 });
 
 // ===== /pay (com ENFORCE_TOTAL_CENTS) =====
-app.post("/pay", async (req, res) => {
+const payLimiter = rateLimit({ windowMs: 60_000, max: RATE_LIMIT_PAY, standardHeaders: true, legacyHeaders: false });
+app.post("/pay", payLimiter, async (req, res) => {
   try {
     if (!process.env.PAGARME_API_KEY) {
       return res.status(500).json({ success: false, error: "PAGARME_API_KEY ausente no .env" });
@@ -227,7 +250,7 @@ app.post("/pay", async (req, res) => {
       method,
       card_number, exp_month, exp_year, cvv,
       installments, address, coupon,
-      total_cents
+      total_cents, items_b64 // <- opcional: auditoria visual
     } = req.body || {};
 
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
@@ -276,7 +299,6 @@ app.post("/pay", async (req, res) => {
     }
 
     // documentos & contato
-    const onlyDigits = (s)=> (s? String(s).replace(/\D/g,'') : '');
     const cpfDigits = onlyDigits(cpf);
     if (cpfDigits.length !== 11) return res.status(400).json({ success: false, error: "CPF inválido. Use 11 dígitos." });
 
@@ -291,7 +313,7 @@ app.post("/pay", async (req, res) => {
       return res.status(400).json({ success:false, error:"CEP inválido (8 dígitos)." });
     }
 
-    const ip = (req.headers["x-forwarded-for"] || req.ip || req.socket.remoteAddress || "").toString().split(",")[0].trim();
+    const ip = clientIp(req);
     const ua = req.headers["user-agent"] || "";
 
     const customer = {
@@ -328,13 +350,30 @@ app.post("/pay", async (req, res) => {
       }
     };
 
+    // Auditoria opcional do resumo visual vindo da loja (se enviado)
+    let uiItems = [];
+    let uiSubtotal = 0;
+    try {
+      uiItems = safeDecodeItemsB64(items_b64 || '');
+      uiSubtotal = subtotalFromItems(uiItems);
+    } catch { /* ignore */ }
+    const subtotalMismatch = Math.abs((uiSubtotal || 0) - amountOriginal);
+    const hasMismatch = Number.isFinite(subtotalMismatch) && subtotalMismatch > 50; // > R$0,50
+    if (hasMismatch) {
+      console.warn('⚠️ subtotal(items_b64) ≠ total_cents', {
+        uiSubtotal, amountOriginal, diff_cents: subtotalMismatch
+      });
+    }
+
     const commonMetadata = {
       ua, ip,
       coupon: coupon || null,
       discount_percent: pct,
       discount_amount_cents: discountValue,
       original_amount_cents: amountOriginal,
-      final_amount_cents: amountFinal
+      final_amount_cents: amountFinal,
+      ui_subtotal_cents: uiSubtotal || null,
+      ui_subtotal_mismatch_cents: hasMismatch ? subtotalMismatch : 0
     };
 
     const items = [{
@@ -348,9 +387,9 @@ app.post("/pay", async (req, res) => {
     // pagamentos
     let payments = [];
     if (method === "pix") {
-      payments = [{ payment_method: "pix", pix: { expires_in: 1800 }, metadata: commonMetadata }];
+      payments = [{ payment_method: "pix", pix: { expires_in: PIX_EXPIRES_IN }, metadata: commonMetadata }];
     } else if (method === "boleto") {
-      const due = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+      const due = new Date(Date.now() + BOLETO_DAYS * 24 * 60 * 60 * 1000).toISOString();
       payments = [{ payment_method: "boleto", boleto: { due_at: due, instructions: "Pague até o vencimento." }, metadata: commonMetadata }];
     } else if (method === "card") {
       if (!card_number || !exp_month || !exp_year || !cvv)
@@ -361,7 +400,7 @@ app.post("/pay", async (req, res) => {
         credit_card: {
           capture: true,
           installments: cardInstallments,
-          statement_descriptor: "PAGUELEVE",
+          statement_descriptor: STATEMENT_DESCRIPTOR,
           card: {
             number: String(card_number).replace(/\s+/g, ""),
             exp_month: Number(exp_month),
@@ -416,12 +455,29 @@ app.post("/pay", async (req, res) => {
         original_amount_cents: amountOriginal,
         discount_percent: pct,
         discount_amount_cents: discountValue,
-        final_amount_cents: amountFinal
+        final_amount_cents: amountFinal,
+        ui_subtotal_cents: uiSubtotal || null,
+        ui_subtotal_mismatch_cents: hasMismatch ? subtotalMismatch : 0
       }
     };
-    if (method === "pix") out.pix = { qr_code: tx.qr_code || tx.qr_code_text || tx.emv || null, qr_code_url: tx.qr_code_url || tx.image_url || null, qr_code_base64: qrCodeBase64 || tx.qr_code_base64 || null, status: tx.status || charge?.status || order.status || null };
-    if (method === "boleto") out.boleto = { url: tx?.url || tx?.pdf?.url || tx?.pdf_url || charge?.url || charge?.pdf?.url || null, line: tx?.line || tx?.line_code || charge?.line || charge?.line_code || null, status: tx?.status || charge?.status || order?.status || null };
-    if (method === "card") out.card = { status: tx?.status || charge?.status || order?.status || null, acquirer_message: tx?.acquirer_message || null, acquirer_tid: tx?.acquirer_tid || null, code: tx?.gateway_response?.code || null, reason: tx?.gateway_response?.errors?.[0]?.message || null };
+    if (method === "pix") out.pix = {
+      qr_code: tx.qr_code || tx.qr_code_text || tx.emv || null,
+      qr_code_url: tx.qr_code_url || tx.image_url || null,
+      qr_code_base64: qrCodeBase64 || tx.qr_code_base64 || null,
+      status: tx.status || charge?.status || order.status || null
+    };
+    if (method === "boleto") out.boleto = {
+      url: tx?.url || tx?.pdf?.url || tx?.pdf_url || charge?.url || charge?.pdf?.url || null,
+      line: tx?.line || tx?.line_code || charge?.line || charge?.line_code || null,
+      status: tx?.status || charge?.status || order?.status || null
+    };
+    if (method === "card") out.card = {
+      status: tx?.status || charge?.status || order?.status || null,
+      acquirer_message: tx?.acquirer_message || null,
+      acquirer_tid: tx?.acquirer_tid || null,
+      code: tx?.gateway_response?.code || null,
+      reason: tx?.gateway_response?.errors?.[0]?.message || null
+    };
 
     return res.json(out);
   } catch (err) {
@@ -473,7 +529,13 @@ app.get("/order/:id", async (req, res) => {
   try {
     const order = await fetchOrder(req.params.id);
     const charge = order.charges?.[0]; const tx = charge?.last_transaction || {};
-    res.json({ success: true, data: { order_id: order.id, order_status: order.status, charge_status: charge?.status || null, transaction_status: tx?.status || null, method: charge?.payment_method || tx?.payment_method || null } });
+    res.json({ success: true, data: {
+      order_id: order.id,
+      order_status: order.status,
+      charge_status: charge?.status || null,
+      transaction_status: tx?.status || null,
+      method: charge?.payment_method || tx?.payment_method || null
+    } });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message || "Falha ao consultar order" });
   }
@@ -498,5 +560,39 @@ app.use("/api", (_req, res) => res.status(404).json({ ok: false, error: "Not fou
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () =>
-  console.log(`🟢 Server on :${PORT} | ENFORCE_TOTAL_CENTS=${ENFORCE_TOTAL}`)
+  console.log(`🟢 Server on :${PORT} | ENFORCE_TOTAL_CENTS=${ENFORCE_TOTAL} | NODE_ENV=${NODE_ENV} | RL(global=${RATE_LIMIT_GLOBAL}/min, pay=${RATE_LIMIT_PAY}/min)`)
 );
+
+// ===== Coupons (fonte da verdade no back) =====
+function evaluateCoupon({ code, amount_cents, method }) {
+  const coupon = String(code || "").trim().toUpperCase();
+  const m = String(method || "pix").toLowerCase();
+  const amt = Math.max(0, Number(amount_cents || 0));
+
+  if (!coupon) return { ok: false, reason: "cupom vazio" };
+  if (amt < 100) return { ok: false, reason: "valor muito baixo" };
+
+  if (coupon === "NATAL10") {
+    const pct = 10;
+    return { ok: true, pct, discount_cents: Math.floor((pct/100)*amt), label: "10% OFF" };
+  }
+  if (coupon === "PIX5") {
+    if (m !== "pix") return { ok:false, reason: "válido somente para Pix" };
+    const pct = 5;
+    return { ok: true, pct, discount_cents: Math.floor((pct/100)*amt), label: "5% OFF (Pix)" };
+  }
+  if (coupon === "PRIMEIRA") {
+    const pct = 15;               // 15% com teto de R$30
+    const cap = 3000;
+    const bruto = Math.floor((pct/100)*amt);
+    return { ok:true, pct, discount_cents: Math.min(bruto, cap), label: "15% OFF (até R$30)" };
+  }
+  if (coupon === "DESCONTO100") {
+    const discount_cents = Math.min(amt - 100, 1000000); // deixa final ~R$1
+    if (discount_cents <= 0) return { ok:false, reason:"valor já mínimo" };
+    return { ok:true, pct: Math.round(100*discount_cents/amt), discount_cents, label:"valor simbólico" };
+  }
+
+  return { ok: false, reason: "cupom não encontrado" };
+}
+
