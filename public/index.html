@@ -38,7 +38,23 @@
   <main class="mx-auto max-w-6xl px-4 py-6">
     <div class="grid grid-cols-1 md:grid-cols-[1fr_380px] gap-6 items-start">
       <!-- FORM (esquerda) -->
-      ... <!-- (mantém o formulário igual ao seu) -->
+      <form class="space-y-4 bg-white p-5 rounded shadow-md">
+        <input type="text" name="name" placeholder="Nome completo" class="w-full px-3 py-2 border rounded">
+        <input type="email" name="email" placeholder="E-mail" class="w-full px-3 py-2 border rounded">
+        <input type="text" name="cpf" placeholder="CPF (somente números)" class="w-full px-3 py-2 border rounded">
+
+        <!-- Campo de celular atualizado -->
+        <input id="phone" 
+               name="phone" 
+               type="tel" 
+               inputmode="numeric" 
+               autocomplete="tel" 
+               placeholder="DDD + número"
+               class="w-full px-3 py-2 border rounded" />
+
+        <input type="text" name="value" placeholder="Valor (R$)" class="w-full px-3 py-2 border rounded">
+        <input type="text" name="coupon" placeholder="Cupom de desconto (%)" class="w-full px-3 py-2 border rounded">
+      </form>
 
       <!-- RESUMO (direita) -->
       <aside class="md:sticky md:top-4">
@@ -151,6 +167,29 @@
 
     // chama uma vez ao carregar
     renderOrderSummary();
+  </script>
+
+  <!-- Máscara de celular -->
+  <script>
+    (function () {
+      const el = document.getElementById('phone');
+      if (!el) return;
+
+      el.addEventListener('input', function (e) {
+        const d = e.target.value.replace(/\D/g, '').slice(0, 11); // só dígitos
+        let v = '';
+
+        if (d.length <= 2) {
+          v = d; // só DDD
+        } else if (d.length <= 7) {
+          v = d.slice(0, 2) + ' ' + d.slice(2); // DDD + início do número
+        } else {
+          v = d.slice(0, 2) + ' ' + d.slice(2, 7) + '-' + d.slice(7); // completo
+        }
+
+        e.target.value = v;
+      });
+    })();
   </script>
 </body>
 </html>
