@@ -44,17 +44,29 @@
         <input type="text" name="cpf" placeholder="CPF (somente números)" class="w-full px-3 py-2 border rounded">
 
         <!-- Campo de celular atualizado -->
-        <input id="phone" 
-               name="phone" 
-               type="tel" 
-               inputmode="numeric" 
-               autocomplete="tel" 
-               placeholder="DDD + número"
-               class="w-full px-3 py-2 border rounded" />
+       <form id="checkout-form" class="space-y-4">
+  
+  <!-- Campo de celular atualizado -->
+  <input id="phone" 
+         name="phone" 
+         type="tel" 
+         inputmode="numeric" 
+         autocomplete="tel" 
+         maxlength="15"
+         placeholder="(11) 91234-5678"
+         class="w-full px-3 py-2 border rounded"
+         required />
 
-        <input type="text" name="value" placeholder="Valor (R$)" class="w-full px-3 py-2 border rounded">
-        <input type="text" name="coupon" placeholder="Cupom de desconto (%)" class="w-full px-3 py-2 border rounded">
-      </form>
+  <input type="text" name="value" placeholder="Valor (R$)" class="w-full px-3 py-2 border rounded">
+  <input type="text" name="coupon" placeholder="Cupom de desconto (%)" class="w-full px-3 py-2 border rounded">
+
+  <!-- botão de enviar -->
+  <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded">
+    Pagar
+  </button>
+
+</form>
+
 
       <!-- RESUMO (direita) -->
       <aside class="md:sticky md:top-4">
@@ -191,5 +203,27 @@
       });
     })();
   </script>
+  <script>
+const phoneInput = document.getElementById("phone");
+
+phoneInput.addEventListener("input", (e) => {
+  let v = e.target.value.replace(/\D/g, ""); // só números
+
+  if (v.length > 11) v = v.slice(0, 11); // trava no 11º dígito
+
+  if (v.length <= 2) {
+    v = `(${v}`;
+  } else if (v.length <= 6) {
+    v = `(${v.slice(0,2)}) ${v.slice(2)}`;
+  } else if (v.length <= 10) {
+    v = `(${v.slice(0,2)}) ${v.slice(2,7)}-${v.slice(7)}`;
+  } else {
+    v = `(${v.slice(0,2)}) ${v.slice(2,7)}-${v.slice(7,11)}`;
+  }
+
+  e.target.value = v;
+});
+</script>
+
 </body>
 </html>

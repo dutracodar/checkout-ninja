@@ -46,10 +46,8 @@ const WH_HEADER = (process.env.PAGARME_WEBHOOK_HEADER || "").toLowerCase();
 const WH_ALGO   = (process.env.PAGARME_WEBHOOK_ALGO || "sha256").toLowerCase();
 
 // ===== Body parsers =====
-// raw body só no webhook
-app.use("/webhook", express.raw({ type: "*/*" }));
-// json no resto
-app.use((req, res, next) => {
+app.use("/webhook", express.raw({ type: "*/*" })); // raw body no webhook
+app.use((req, res, next) => { // json no resto
   if (req.path === "/webhook") return next();
   express.json({ limit: "1mb", type: "*/*" })(req, res, next);
 });
@@ -107,9 +105,9 @@ async function shopifyAdmin(pathApi, method = "GET", body = null, extraHeaders =
   if (!SHOP_DOMAIN || !SHOP_TOKEN) throw new Error("Shopify não configurado");
   const url = `https://${SHOP_DOMAIN}/admin/api/${SHOP_VERSION}/${pathApi}`;
   const headers = { "X-Shopify-Access-Token": SHOP_TOKEN, "Content-Type": "application/json", ...extraHeaders };
-  const opts = { method, headers, timeout: 20000 };
+  const opts = { url, method, headers, timeout: 20000 };
   if (body) opts.data = body;
-  return axios({ url, ...opts });
+  return axios(opts);
 }
 const onlyDigits = (s) => (s ? String(s).replace(/\D/g, "") : "");
 
@@ -200,6 +198,91 @@ app.get(`/${PROXY_PREFIX}/${PROXY_SUBPATH}`, async (req, res) => {
   }
 });
 
+// ===== Helper: criar pedido pendente na Shopify =====
+async function createShopifyPendingOrder({
+  email,
+  name,
+  phoneDigits,
+  billing_address,
+  shipping,
+  uiItems,
+  amountFinal,
+  amountOriginal,
+  coupon,
+  pagarmeOrderId,
+  pagarmeChargeId,
+  paymentMethod
+}) {
+  if (!SHOP_DOMAIN || !SHOP_TOKEN) {
+    console.warn("Shopify não configurado — pulando criação do pedido.");
+    return { created: false, reason: "missing_credentials" };
+  }
+
+  // line_items: usa os itens do resumo (quando vierem), senão 1 item totalizador
+  let line_items = [];
+  if (Array.isArray(uiItems) && uiItems.length) {
+    line_items = uiItems.map(it => ({
+      title: it.title || "Produto",
+      quantity: Math.max(1, Number(it.quantity || it.qty || 1)),
+      price: ((Number(it.price_cents || 0) / 100) || 0).toFixed(2)
+    }));
+  } else {
+    line_items = [{
+      title: "Pedido Pague Leve",
+      quantity: 1,
+      price: (Number(amountFinal || amountOriginal || 0) / 100).toFixed(2)
+    }];
+  }
+
+  // endereços no formato Shopify
+  const shopifyBilling = {
+    address1: billing_address?.line_1 || "",
+    address2: billing_address?.line_2 || "",
+    zip:      billing_address?.zip_code || "",
+    city:     billing_address?.city || "",
+    province: billing_address?.state || "",
+    country:  "BR",
+    name:     name || "",
+    phone:    phoneDigits || ""
+  };
+  const shopifyShipping = {
+    address1: shipping?.address?.line_1 || "",
+    address2: "",
+    zip:      shipping?.address?.zip_code || "",
+    city:     shipping?.address?.city || "",
+    province: shipping?.address?.state || "",
+    country:  "BR",
+    name:     name || "",
+    phone:    phoneDigits || ""
+  };
+
+  const orderPayload = {
+    order: {
+      email,
+      line_items,
+      financial_status: "pending",
+      billing_address: shopifyBilling,
+      shipping_address: shopifyShipping,
+      send_receipt: true,
+      tags: ["Pagarme", "PagueLeve", (paymentMethod || "UNKNOWN").toUpperCase()].join(", "),
+      note: `Checkout Pague Leve — aguardando pagamento (${paymentMethod})`,
+      note_attributes: [
+        { name: "pagarme_order_id",  value: pagarmeOrderId || "" },
+        { name: "pagarme_charge_id", value: pagarmeChargeId || "" },
+        { name: "payment_method",    value: paymentMethod || "" },
+        { name: "original_amount_cents", value: String(amountOriginal || 0) },
+        { name: "final_amount_cents",    value: String(amountFinal || amountOriginal || 0) },
+        { name: "coupon", value: coupon || "" }
+      ]
+    }
+  };
+
+  const resp = await shopifyAdmin("orders.json", "POST", orderPayload);
+  const shopifyOrderId = resp?.data?.order?.id;
+  console.log("🟡 Shopify: pedido pendente criado:", shopifyOrderId);
+  return { created: true, shopify_order_id: shopifyOrderId };
+}
+
 // ===== APIs =====
 app.get("/api/checkout-start", (req, res) => {
   const cart_id = String(req.query.cart_id || "").trim();
@@ -250,7 +333,7 @@ app.post("/pay", payLimiter, async (req, res) => {
       method,
       card_number, exp_month, exp_year, cvv,
       installments, address, coupon,
-      total_cents, items_b64 // <- opcional: auditoria visual
+      total_cents, items_b64 // <- opcional: auditoria visual + Shopify items
     } = req.body || {};
 
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
@@ -443,6 +526,26 @@ app.post("/pay", payLimiter, async (req, res) => {
       } catch (e) { console.warn("⚠️ Falha ao baixar QR base64:", e?.response?.status || e.message); }
     }
 
+    // 🔶 CRIA PEDIDO PENDENTE NA SHOPIFY (não bloqueia o retorno ao front)
+    try {
+      await createShopifyPendingOrder({
+        email,
+        name,
+        phoneDigits,
+        billing_address,
+        shipping,
+        uiItems,
+        amountFinal,
+        amountOriginal,
+        coupon,
+        pagarmeOrderId: order?.id || "",
+        pagarmeChargeId: charge?.id || "",
+        paymentMethod: method
+      });
+    } catch (e) {
+      console.warn("Shopify: falha ao criar pedido pendente:", e?.response?.data || e.message);
+    }
+
     // resposta
     const out = {
       success: true,
@@ -513,9 +616,9 @@ app.post("/webhook", async (req, res) => {
       catch { return {}; }
     })();
 
-    // opcional: criar pedido na Shopify quando pago
-    // const result = await createShopifyPaidOrderFromPagarmePayload(json);
-    // if (result.created) console.log("✅ Pedido criado na Shopify:", result.shopify_order_id);
+    // 🔸 Futuro: localizar pedido Shopify (note_attributes.pagarme_order_id)
+    // e marcar como "paid" quando o evento do Pagar.me indicar pagamento confirmado.
+
     return res.sendStatus(200);
   } catch (e) {
     console.error("webhook error:", e?.response?.data || e.message);
@@ -595,4 +698,3 @@ function evaluateCoupon({ code, amount_cents, method }) {
 
   return { ok: false, reason: "cupom não encontrado" };
 }
-
