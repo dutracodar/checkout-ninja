@@ -46,11 +46,14 @@ const WH_HEADER = (process.env.PAGARME_WEBHOOK_HEADER || "").toLowerCase();
 const WH_ALGO   = (process.env.PAGARME_WEBHOOK_ALGO || "sha256").toLowerCase();
 
 // ===== Body parsers =====
-app.use("/webhook", express.raw({ type: "*/*" })); // raw body no webhook
-app.use((req, res, next) => { // json no resto
+// raw body APENAS no webhook
+app.use("/webhook", express.raw({ type: "*/*" }));
+// JSON no resto
+app.use((req, res, next) => {
   if (req.path === "/webhook") return next();
-  express.json({ limit: "1mb", type: "*/*" })(req, res, next);
+  return express.json({ limit: "1mb", type: "*/*" })(req, res, next);
 });
+// (opcional) aceitar forms clássicos também
 app.use(express.urlencoded({ extended: true }));
 
 // ===== Segurança / Perf / Logs =====
@@ -64,9 +67,7 @@ app.use(morgan(LOG_FORMAT));
 // ===== CORS — allowlist seguro (Shopify + seus domínios) =====
 const DEFAULT_ALLOWED = ['https://pagueleve.com','https://checkout.pagueleve.com'];
 const EXTRA_ALLOWED = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+  .split(",").map(s => s.trim()).filter(Boolean);
 const ALLOWED_ORIGINS = [...new Set([...DEFAULT_ALLOWED, ...EXTRA_ALLOWED])];
 
 const corsOpts = {
@@ -127,9 +128,7 @@ function authHeader() {
 }
 function clientIp(req) {
   return (req.headers["x-forwarded-for"] || req.ip || req.socket.remoteAddress || "")
-    .toString()
-    .split(",")[0]
-    .trim();
+    .toString().split(",")[0].trim();
 }
 async function fetchOrder(orderId) {
   const resp = await axios.get(`https://api.pagar.me/core/v5/orders/${orderId}`, {
@@ -218,7 +217,6 @@ async function createShopifyPendingOrder({
     return { created: false, reason: "missing_credentials" };
   }
 
-  // line_items: usa os itens do resumo (quando vierem), senão 1 item totalizador
   let line_items = [];
   if (Array.isArray(uiItems) && uiItems.length) {
     line_items = uiItems.map(it => ({
@@ -234,7 +232,6 @@ async function createShopifyPendingOrder({
     }];
   }
 
-  // endereços no formato Shopify
   const shopifyBilling = {
     address1: billing_address?.line_1 || "",
     address2: billing_address?.line_2 || "",
@@ -283,7 +280,7 @@ async function createShopifyPendingOrder({
   return { created: true, shopify_order_id: shopifyOrderId };
 }
 
-// ===== APIs =====
+// ===== APIs auxiliares =====
 app.get("/api/checkout-start", (req, res) => {
   const cart_id = String(req.query.cart_id || "").trim();
   const total_raw = String(req.query.total_cents || "").trim();
@@ -292,20 +289,15 @@ app.get("/api/checkout-start", (req, res) => {
     return res.status(400).json({ ok: false, error: "Missing params", got: { cart_id, total_raw } });
   return res.status(200).json({ ok: true, step: "checkout:start", cart_id, total_cents });
 });
-
-// sempre em centavos
 app.post("/api/coupon-check", async (req, res) => {
   try {
     const { code, total_cents, method } = req.body || {};
     const amount = Math.max(1, Number(total_cents || 0));
     const coup = evaluateCoupon({ code, amount_cents: amount, method: String(method || "pix").toLowerCase() });
-
     if (!coup.ok) return res.json({ ok:false, reason: coup.reason || "inválido" });
-
     const discount_cents = coup.discount_cents || 0;
     const final_amount_cents = Math.max(1, amount - discount_cents);
     const pct = coup.pct ?? Math.round(100 * discount_cents / amount);
-
     return res.json({
       ok: true,
       label: coup.label || "",
@@ -315,6 +307,163 @@ app.post("/api/coupon-check", async (req, res) => {
     });
   } catch (e) {
     return res.status(500).json({ ok:false, error: e.message || "Falha no coupon-check" });
+  }
+});
+
+// ===== STEP 1: /checkout -> escolhe método e despacha p/ /pay =====
+app.post('/checkout', async (req, res) => {
+  try {
+    const {
+      name, email, cpf, phone,
+      total_cents, value_cents,
+      items_b64, cart_id, coupon
+    } = req.body || {};
+
+    const amount = Number(value_cents || total_cents || 0);
+    if (!name || !email || !cpf || !phone || amount <= 0) {
+      return res.status(400).json({ error: 'Dados insuficientes' });
+    }
+
+    const allowBoleto = amount >= 1000;
+    const html = `
+<!DOCTYPE html><html lang="pt-BR"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Escolha o pagamento</title>
+<style>
+  body{font-family:system-ui,Arial,sans-serif;background:#f3f4f6;margin:0;padding:24px}
+  .card{max-width:520px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.06);padding:20px}
+  .title{font-weight:700;margin:0 0 8px 0}
+  .row{display:flex;gap:8px;margin-top:12px}
+  button{flex:1;padding:12px 16px;border-radius:10px;border:1px solid #e5e7eb;background:#111827;color:#fff;cursor:pointer}
+  button.sec{background:#fff;color:#111;border:1px solid #e5e7eb}
+  .tiny{color:#6b7280;font-size:12px;margin-top:6px}
+  input,select{width:100%;padding:10px;border:1px solid #e5e7eb;border-radius:8px;margin-top:8px}
+</style>
+</head><body>
+<div class="card">
+  <h2 class="title">Pagar R$ ${(amount/100).toFixed(2).replace('.',',')}</h2>
+  <div class="tiny">Escolha o método de pagamento</div>
+
+  <div class="row">
+    <button id="btnPix">Pix</button>
+    <button id="btnBoleto" class="sec" ${allowBoleto ? '' : 'disabled style="opacity:.5;cursor:not-allowed"'}>Boleto</button>
+  </div>
+
+  <details style="margin-top:14px">
+    <summary style="cursor:pointer">Cartão de crédito</summary>
+    <div style="margin-top:10px">
+      <input id="card_number" placeholder="Número do cartão (sem espaços)" inputmode="numeric" />
+      <div class="row" style="margin-top:8px">
+        <input id="exp_month" placeholder="Mês (MM)" inputmode="numeric" />
+        <input id="exp_year" placeholder="Ano (AAAA)" inputmode="numeric" />
+        <input id="cvv" placeholder="CVV" inputmode="numeric" />
+      </div>
+      <select id="installments" style="margin-top:8px">
+        <option value="1" selected>1x</option>
+        <option value="2">2x</option>
+        <option value="3">3x</option>
+        <option value="4">4x</option>
+        <option value="5">5x</option>
+        <option value="6">6x</option>
+      </select>
+      <button id="btnCard" style="margin-top:10px">Pagar com cartão</button>
+    </div>
+  </details>
+
+  <div class="tiny">Ao continuar, você concorda com os termos de pagamento.</div>
+</div>
+
+<script>
+  const payloadBase = ${JSON.stringify({
+    name: '', email: '', cpf: '', phone: '',
+    total_cents: 0, items_b64: items_b64 || null, cart_id: cart_id || null, coupon: coupon || null
+  })};
+  payloadBase.name  = ${JSON.stringify(name)};
+  payloadBase.email = ${JSON.stringify(email)};
+  payloadBase.cpf   = ${JSON.stringify(cpf)};
+  payloadBase.phone = ${JSON.stringify(phone)};
+  payloadBase.total_cents = ${amount};
+
+  async function pay(method, extra={}) {
+    const btn = document.activeElement;
+    if (btn) { btn.disabled = true; btn.textContent = 'Processando...'; }
+    try {
+      const resp = await fetch('/pay', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ ...payloadBase, method, ...extra })
+      });
+      const data = await resp.json();
+
+      if (!resp.ok || data.success === false) {
+        alert('Falha no pagamento: ' + (data.error || resp.status));
+        if (btn) { btn.disabled = false; btn.textContent = btn.id==='btnCard'?'Pagar com cartão':btn.textContent.includes('Pix')?'Pix':'Boleto'; }
+        return;
+      }
+
+      if (method === 'pix' && data.pix) {
+        const txt = data.pix.qr_code || '';
+        const img = data.pix.qr_code_base64 ? 'data:image/png;base64,'+data.pix.qr_code_base64 : null;
+        document.open(); document.write(\`
+          <div style="font-family:system-ui;padding:24px">
+            <h2>Pix</h2>
+            \${img ? '<img src="\'+img+\'" style="max-width:260px"/>' : ''}
+            <pre style="white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:8px">\${txt}</pre>
+            <div>Status: \${data.pix.status || 'pendente'}</div>
+          </div>\`); document.close();
+        return;
+      }
+
+      if (method === 'boleto' && data.boleto) {
+        const url  = data.boleto.url;
+        const line = data.boleto.line;
+        document.open(); document.write(\`
+          <div style="font-family:system-ui;padding:24px">
+            <h2>Boleto</h2>
+            \${url ? '<p><a href="\'+url+\'" target="_blank">Abrir boleto/PDF</a></p>' : ''}
+            \${line ? '<pre style="white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:8px">'+line+'</pre>' : ''}
+            <div>Status: \${data.boleto.status || 'pendente'}</div>
+          </div>\`); document.close();
+        return;
+      }
+
+      if (method === 'card') {
+        document.open(); document.write(\`
+          <div style="font-family:system-ui;padding:24px">
+            <h2>Cartão</h2>
+            <div>Status: \${(data.card && data.card.status) || data.data?.charge_status || 'processado'}</div>
+            \${data.card?.acquirer_message ? '<div>Mensagem: '+data.card.acquirer_message+'</div>' : ''}
+          </div>\`); document.close();
+        return;
+      }
+
+      location.reload();
+    } catch (e) {
+      alert('Falha de rede: ' + e.message);
+      if (btn) { btn.disabled = false; }
+    }
+  }
+
+  document.getElementById('btnPix').onclick = () => pay('pix');
+  const btnBol = document.getElementById('btnBoleto');
+  if (btnBol && !btnBol.disabled) btnBol.onclick = () => pay('boleto');
+
+  document.getElementById('btnCard').onclick = () => {
+    const number = document.getElementById('card_number').value.replace(/\\s+/g,'');
+    const exp_month = document.getElementById('exp_month').value;
+    const exp_year  = document.getElementById('exp_year').value;
+    const cvv       = document.getElementById('cvv').value;
+    const installments = document.getElementById('installments').value || '1';
+    pay('card', { card_number:number, exp_month, exp_year, cvv, installments });
+  };
+</script>
+</body></html>
+    `.trim();
+
+    return res.json({ html });
+  } catch (e) {
+    console.error('POST /checkout error', e);
+    return res.status(500).json({ error: 'Erro interno' });
   }
 });
 
@@ -333,7 +482,7 @@ app.post("/pay", payLimiter, async (req, res) => {
       method,
       card_number, exp_month, exp_year, cvv,
       installments, address, coupon,
-      total_cents, items_b64 // <- opcional: auditoria visual + Shopify items
+      total_cents, items_b64
     } = req.body || {};
 
     if (!name || !email)  return res.status(400).json({ success: false, error: "Nome e e-mail são obrigatórios." });
@@ -616,9 +765,7 @@ app.post("/webhook", async (req, res) => {
       catch { return {}; }
     })();
 
-    // 🔸 Futuro: localizar pedido Shopify (note_attributes.pagarme_order_id)
-    // e marcar como "paid" quando o evento do Pagar.me indicar pagamento confirmado.
-
+    // 🔸 Futuro: localizar pedido Shopify e marcar como paid
     return res.sendStatus(200);
   } catch (e) {
     console.error("webhook error:", e?.response?.data || e.message);
