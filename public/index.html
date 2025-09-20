@@ -38,10 +38,10 @@
   <main class="mx-auto max-w-6xl px-4 py-6">
     <div class="grid grid-cols-1 md:grid-cols-[1fr_380px] gap-6 items-start">
       <!-- FORM (esquerda) -->
-      <form id="checkout-form" method="POST" action="/checkout" class="space-y-4 bg-white p-5 rounded shadow-md">
-        <input type="text" name="name" placeholder="Nome completo" class="w-full px-3 py-2 border rounded" required>
-        <input type="email" name="email" placeholder="E-mail" class="w-full px-3 py-2 border rounded" required>
-        <input type="text" name="cpf" placeholder="CPF (somente números)" class="w-full px-3 py-2 border rounded" required>
+      <form id="checkout-form" method="POST" action="/checkout" class="space-y-4 bg-white p-5 rounded shadow-md" autocomplete="off">
+        <input type="text" name="name" placeholder="Nome completo" class="w-full px-3 py-2 border rounded" required autocomplete="name">
+        <input type="email" name="email" placeholder="E-mail" class="w-full px-3 py-2 border rounded" required autocomplete="email">
+        <input type="text" name="cpf" placeholder="CPF (somente números)" inputmode="numeric" autocomplete="off" class="w-full px-3 py-2 border rounded" required>
 
         <!-- Celular -->
         <input id="phone"
@@ -55,7 +55,7 @@
                required />
 
         <!-- Valor (automático) -->
-        <input id="amount_brl" name="value" placeholder="Valor (R$)" class="w-full px-3 py-2 border rounded" readonly>
+        <input id="amount_brl" name="value" placeholder="Valor (R$)" class="w-full px-3 py-2 border rounded bg-gray-50" readonly>
         <input type="hidden" id="total_cents" name="total_cents">
         <input type="hidden" id="value_cents" name="value_cents">
 
@@ -89,13 +89,10 @@
 
   <!-- Scripts -->
   <script>
-    // =====================================================
-    // Resumo lateral (itens)
-    // =====================================================
+    // ================= Resumo lateral =================
     function brlFmt(cents){
       return (Number(cents||0)/100).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
     }
-
     function b64urlToJson(b64url){
       if (!b64url) return [];
       const b64 = b64url.replace(/-/g,'+').replace(/_/g,'/');
@@ -104,7 +101,6 @@
       try { return JSON.parse(decodeURIComponent(escape(str))); }
       catch { return JSON.parse(str); }
     }
-
     function parseItemsFromQS(){
       const p = new URLSearchParams(location.search);
       const b64 = p.get('items_b64');
@@ -113,13 +109,11 @@
       if (raw){ try { return JSON.parse(decodeURIComponent(raw)); } catch { return []; } }
       return [];
     }
-
     function renderOrderSummary(){
       const items = parseItemsFromQS();
       const box   = document.getElementById('order-summary');
       const wrap  = document.getElementById('order-items');
       if (!box || !wrap) return;
-
       if (!items.length){ box.classList.add('hidden'); return; }
 
       let subtotal = 0;
@@ -163,23 +157,18 @@
       box.classList.remove('hidden');
     }
 
-    // Atualiza Total do resumo + inputs quando alguém chamar setTotalCents
+    // Hook para refletir total no resumo + inputs
     (function hookTotals(){
       const orig = window.setTotalCents;
       window.setTotalCents = function(cents){
         if (typeof orig === 'function') orig(cents);
-
         const centsNum = Number(cents || 0);
-
         const totalSpan = document.getElementById('sum-total');
         if (totalSpan) totalSpan.textContent = brlFmt(centsNum);
-
         const amountInput = document.getElementById('amount_brl');
         if (amountInput) amountInput.value = brlFmt(centsNum);
-
         const hidden = document.getElementById('total_cents');
         if (hidden) hidden.value = centsNum;
-
         const hidden2 = document.getElementById('value_cents');
         if (hidden2) hidden2.value = centsNum;
       };
@@ -188,7 +177,7 @@
     window.renderOrderSummary = renderOrderSummary;
     renderOrderSummary();
 
-    // Define o valor inicial: URL ? total_cents : subtotal dos itens
+    // Valor inicial: ?total_cents=... ou subtotal(items_b64)
     (function initAmount(){
       const amountInput = document.getElementById('amount_brl');
       const hidden = document.getElementById('total_cents');
@@ -219,14 +208,13 @@
     })();
   </script>
 
-  <!-- Máscara de celular (única) -->
+  <!-- Máscara de celular (única, caret estável) -->
   <script>
   (function () {
     const el = document.getElementById('phone');
     if (!el) return;
 
     function format(raw) {
-      // (DD) 99999-9999 progressivo
       const d = (raw || '').replace(/\D/g, '').slice(0, 11);
       let out = '';
       if (d.length > 0) out = '(' + d.slice(0, 2);
@@ -249,92 +237,76 @@
       try { e.target.setSelectionRange(pos, pos); } catch (_) {}
     });
 
-    // pré-formatar se vier valor
     el.value = format(el.value);
   })();
   </script>
 
+  <!-- Submit como JSON + sanitize cpf/phone -->
   <script>
-// Envia o checkout como JSON (evita "Bad Request")
-(function () {
-  const form = document.getElementById('checkout-form');
-  if (!form) return;
+  (function () {
+    const form = document.getElementById('checkout-form');
+    if (!form) return;
 
-  function onlyDigits(s){ return String(s||'').replace(/\D/g,''); }
+    function onlyDigits(s){ return String(s||'').replace(/\D/g,''); }
 
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
 
-    const btn = form.querySelector('button[type="submit"]');
-    if (btn) { btn.disabled = true; btn.textContent = 'Processando...'; }
+      const btn = form.querySelector('button[type="submit"]');
+      if (btn) { btn.disabled = true; btn.textContent = 'Processando...'; }
 
-    // Query params úteis (itens, total, tracking)
-    const qs = new URLSearchParams(location.search);
+      const qs = new URLSearchParams(location.search);
 
-    // Monta o payload que o backend espera
-    const payload = {
-      name:   form.name.value.trim(),
-      email:  form.email.value.trim(),
-      cpf:    onlyDigits(form.cpf.value),
-      phone:  onlyDigits(document.getElementById('phone').value),
-      // centavos vindos do front
-      value_cents: Number(
-        document.getElementById('value_cents')?.value
-        || document.getElementById('total_cents')?.value
-        || 0
-      ),
-      total_cents: Number(document.getElementById('total_cents')?.value || 0),
+      const payload = {
+        name:   form.name.value.trim(),
+        email:  form.email.value.trim(),
+        cpf:    onlyDigits(form.cpf.value),                          // << só dígitos
+        phone:  onlyDigits(document.getElementById('phone').value),  // << só dígitos
+        value_cents: Number(document.getElementById('value_cents')?.value
+                       || document.getElementById('total_cents')?.value || 0),
+        total_cents: Number(document.getElementById('total_cents')?.value || 0),
+        items_b64: qs.get('items_b64') || null,
+        cart_id:   qs.get('cart_id')   || null,
+        coupon:    form.coupon?.value  || null,
+        utm_source:   qs.get('utm_source')   || null,
+        utm_medium:   qs.get('utm_medium')   || null,
+        utm_campaign: qs.get('utm_campaign') || null,
+        fbclid:       qs.get('fbclid')       || null,
+        gclid:        qs.get('gclid')        || null
+      };
 
-      // dados do carrinho/utm da URL (se existirem)
-      items_b64: qs.get('items_b64') || null,
-      cart_id:   qs.get('cart_id')   || null,
-      coupon:    form.coupon?.value  || null,
+      try {
+        const res = await fetch('/checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
 
-      // passthrough UTM (se quiser aproveitar no backend)
-      utm_source:   qs.get('utm_source')   || null,
-      utm_medium:   qs.get('utm_medium')   || null,
-      utm_campaign: qs.get('utm_campaign') || null,
-      fbclid:       qs.get('fbclid')       || null,
-      gclid:        qs.get('gclid')        || null
-    };
+        if (!res.ok) {
+          const txt = await res.text();
+          alert('Erro no checkout: ' + (txt || res.status));
+          if (btn) { btn.disabled = false; btn.textContent = 'Pagar'; }
+          return;
+        }
 
-    try {
-      const res = await fetch('/checkout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+        const data = await res.json().catch(() => ({}));
 
-      // Se o backend responder erro, mostra e destrava botão
-      if (!res.ok) {
-        const txt = await res.text();
-        alert('Erro no checkout: ' + (txt || res.status));
+        if (data.redirect_url) {
+          location.href = data.redirect_url;
+        } else if (data.html) {
+          document.open(); document.write(data.html); document.close();
+        } else if (data.order_id) {
+          location.href = '/payment?order_id=' + data.order_id;
+        } else {
+          location.reload();
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Falha de rede no checkout.');
         if (btn) { btn.disabled = false; btn.textContent = 'Pagar'; }
-        return;
       }
-
-      // Fluxos possíveis: redirect_url, html ou dados do pedido
-      const data = await res.json().catch(() => ({}));
-
-      if (data.redirect_url) {
-        location.href = data.redirect_url;               // ex.: página Pix/Boleto/Cartão
-      } else if (data.html) {
-        document.open(); document.write(data.html); document.close();
-      } else if (data.order_id) {
-        location.href = '/payment?order_id=' + data.order_id;
-      } else {
-        // fallback: recarrega para não ficar parado
-        location.reload();
-      }
-
-    } catch (err) {
-      console.error(err);
-      alert('Falha de rede no checkout.');
-      if (btn) { btn.disabled = false; btn.textContent = 'Pagar'; }
-    }
-  });
-})();
-</script>
-
+    });
+  })();
+  </script>
 </body>
 </html>
