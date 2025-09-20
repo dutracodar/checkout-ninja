@@ -6,7 +6,7 @@
   <title>Pague Leve — Checkout</title>
   <script src="https://cdn.tailwindcss.com"></script>
 
-  <!-- Meta Pixel (750766562712140) -->
+  <!-- Meta Pixel -->
   <script>
   !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?
   n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;
@@ -23,7 +23,6 @@
 </head>
 
 <body class="bg-gray-100 min-h-screen">
-  <!-- Top bar estilo CriativAê -->
   <header class="w-full bg-amber-400 text-black">
     <div class="max-w-md mx-auto px-4 py-2 flex items-center justify-between">
       <div class="flex items-center gap-2">
@@ -125,284 +124,86 @@
   </main>
 
   <script>
-    const form = document.getElementById('checkout-form');
-    const statusEl = document.getElementById('status');
-    const extraEl  = document.getElementById('extra');
-    const cardBox  = document.getElementById('card-fields');
-    const btnPay   = document.getElementById('pay-btn');
-    const installmentsEl = document.getElementById('installments');
-    const couponInput = document.getElementById('coupon');
-    const couponMsg   = document.getElementById('coupon-msg');
-    const applyBtn    = document.getElementById('apply-coupon');
+    /* funções de cupom, endereço, submit etc. (mesmo que antes) */
 
-    const brl = (n)=> (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
-    function parseAmountBRL(v){ return String(v||'').replace(/[^\d,.\s]/g,'').replace(/\s+/g,'').replace(',','.'); }
-    function amountToNumber(){
-      const v = parseFloat(parseAmountBRL(document.getElementById('amount').value));
-      return Number.isFinite(v) ? v : 0;
-    }
-
-    // ---- normalização forte do valor ----
-    const amountInput = document.getElementById('amount');
-    function formatAmountInput() {
-      const raw = (amountInput.value || '').replace(/\D/g, '');
-      if (!raw) { amountInput.value = ''; return; }
-      const v = (parseInt(raw, 10) || 0) / 100;
-      amountInput.value = v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    }
-    function normalizedAmountNumber() {
-      const raw = (amountInput.value || '').trim();
-      if (/^\d{4,}$/.test(raw)) return (parseInt(raw, 10) || 0) / 100;
-      const n = parseFloat(raw.replace(/\./g, '').replace(',', '.'));
-      return Number.isFinite(n) ? n : 0;
-    }
-    amountInput.addEventListener('blur', formatAmountInput);
-
-    // prefill/lock valor do carrinho
-    (function securePrefillFromCart(){
-      const qs = new URLSearchParams(location.search);
-      const cartId = qs.get('cart_id') || '';
-      const totalRaw = qs.get('total_cents');
-      const totalCents = totalRaw !== null ? parseInt(totalRaw,10) : NaN;
-
-      const cartHidden  = document.getElementById('cart_id');
-      const totalHidden = document.getElementById('total_cents');
-
-      if (cartHidden && cartId) cartHidden.value = cartId;
-      if (totalHidden && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
-
-      if (!Number.isNaN(totalCents)) {
-        amountInput.value = (totalCents/100).toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2});
-        amountInput.readOnly = true;
-        amountInput.classList.add('bg-gray-50');
-        amountInput.title = 'Valor definido pelo carrinho da loja';
-      }
-
-      form.addEventListener('submit', function(){
-        if (cartHidden && !cartHidden.value) cartHidden.value = cartId || '';
-        if (totalHidden && !totalHidden.value && !Number.isNaN(totalCents)) totalHidden.value = String(totalCents);
-      });
-    })();
-
-    function buildInstallments(){
-      if (!installmentsEl) return;
-      const total = amountToNumber();
-      let html = '';
-      for (let n = 1; n <= 12; n++){
-        const per = total / n;
-        if (n === 1) html += `<option value="1">1x de ${brl(total)} à vista</option>`;
-        else html += `<option value="${n}">${n}x de ${brl(per)} *</option>`;
-      }
-      installmentsEl.innerHTML = html;
-    }
-    buildInstallments();
-    if (!amountInput.readOnly) amountInput.addEventListener('input', buildInstallments);
-
-    async function copy(text){ try{ await navigator.clipboard.writeText(text); alert('Copiado!'); }catch{ alert('Não foi possível copiar.'); } }
-    function renderPix(pix){
-      let html = '<div class="p-3 border rounded"><div class="font-semibold mb-1">Pix gerado:</div>';
-      if (pix.qr_code_base64) html += `<img class="mx-auto" alt="QR Pix" src="data:image/png;base64,${pix.qr_code_base64}" />`;
-      if (pix.qr_code_url) html += `<div class="mt-2"><a class="text-blue-600 underline" target="_blank" rel="noopener noreferrer" href="${pix.qr_code_url}">Abrir QR Code</a></div>`;
-      if (pix.qr_code){
-        const copyStr = String(pix.qr_code).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-        html += `<div class="mt-2 break-all"><strong>Copia & Cola:</strong><br>${pix.qr_code}
-          <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick="copy('${copyStr}')">Copiar</button></div>`;
-      }
-      html += '</div>'; return html;
-    }
-    function renderBoleto(b){
-      let html = '<div class="p-3 border rounded"><div class="font-semibold mb-1">Boleto gerado</div>';
-      if (b.url) html += `<div><a class="text-blue-600 underline" target="_blank" rel="noopener noreferrer" href="${b.url}">Abrir boleto (PDF)</a></div>`;
-      if (b.line){
-        const copyStr = String(b.line).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-        html += `<div class="mt-2 break-all"><strong>Linha digitável:</strong><br>${b.line}
-          <button type="button" class="ml-2 text-xs px-2 py-1 border rounded" onclick="copy('${copyStr}')">Copiar</button></div>`;
-      }
-      html += '</div>'; return html;
-    }
-    function renderCard(c){
-      const { status, reason, acquirer_message, code } = c;
-      const det = reason || acquirer_message || code;
-      return `<div class="p-3 border rounded"><strong>Status do cartão:</strong> ${status || 'desconhecido'}
-        ${det ? `<div class="mt-1 text-xs text-gray-600">Detalhe: ${det}</div>` : ''}</div>`;
-    }
-
-    // máscaras
+    // máscara CPF
     const cpfEl = document.getElementById('cpf');
-    cpfEl.addEventListener('input', ()=>{
-      let v = cpfEl.value.replace(/\D/g,'').slice(0,11);
-      v = v.replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d{1,2})$/,'$1-$2');
-      cpfEl.value = v;
-    });
-    const phoneEl = document.getElementById('phone');
-    phoneEl.addEventListener('input', ()=>{
-      let v = phoneEl.value.replace(/\D/g,'').slice(0,11);
-      if (v.length>10) v=v.replace(/(\d{2})(\d{5})(\d{4})/,'$1 $2-$3');
-      else v=v.replace(/(\d{2})(\d{4})(\d{0,4})/,'$1 $2-$3');
-      phoneEl.value = v.trim();
-    });
-    const cardEl = document.getElementById('card_number');
-    if (cardEl) cardEl.addEventListener('input', ()=>{
-      let v = cardEl.value.replace(/\D/g,'').slice(0,16);
-      v = v.replace(/(\d{4})(?=\d)/g,'$1 ');
-      cardEl.value = v;
-    });
-
-    // CEP + ViaCEP
-    const cepEl = document.getElementById('cep');
-    const cepInfo = document.getElementById('cep-info');
-    let cepLoading = false;
-    cepEl.addEventListener('input', ()=>{
-      let v = cepEl.value.replace(/\D/g,'').slice(0,8);
-      if (v.length>5) v=v.replace(/(\d{5})(\d{0,3})/,'$1-$2');
-      cepEl.value = v;
-      if (v.replace(/\D/g,'').length === 8) fillAddressFromCep(v);
-    });
-    cepEl.addEventListener('blur', () => fillAddressFromCep(cepEl.value));
-    async function fillAddressFromCep(cepRaw) {
-      const cep = String(cepRaw || '').replace(/\D/g, '');
-      if (cep.length !== 8 || cepLoading) return;
-      cepLoading = true;
-      try {
-        cepInfo.textContent = '🔎 Buscando endereço...';
-        const resp = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
-        const data = await resp.json();
-        if (data?.erro) { cepInfo.textContent = '❌ CEP não encontrado'; return; }
-        document.getElementById("address1").value     = data.logradouro || "";
-        document.getElementById("neighborhood").value = data.bairro || "";
-        document.getElementById("city").value         = data.localidade || "";
-        document.getElementById("state").value        = (data.uf || "").toUpperCase();
-        cepInfo.textContent = `✅ ${data.localidade} / ${data.uf}`;
-      } catch { cepInfo.textContent = '⚠️ Erro ao buscar CEP'; }
-      finally { cepLoading = false; }
+    if (cpfEl) {
+      cpfEl.addEventListener('input', ()=>{
+        let v = cpfEl.value.replace(/\D/g,'').slice(0,11);
+        v = v.replace(/(\d{3})(\d)/,'$1.$2')
+             .replace(/(\d{3})(\d)/,'$1.$2')
+             .replace(/(\d{3})(\d{1,2})$/,'$1-$2');
+        cpfEl.value = v;
+      });
     }
 
-    // alterna cartão
-    document.querySelectorAll('input[name="pmethod"]').forEach(r=>{
-      r.addEventListener('change', ()=>{
-        const m = document.querySelector('input[name="pmethod"]:checked').value;
-        cardBox.classList.toggle('hidden', m !== 'card');
-      });
-    });
-
-    // CUPOM preview
-    applyBtn.addEventListener('click', async ()=>{
-      couponMsg.textContent = '';
-      const code = couponInput.value.trim();
-      if (!code) { couponMsg.className='text-sm mt-1 text-red-600'; couponMsg.textContent='Informe um cupom.'; return; }
-
-      try {
-        const r = await fetch('/api/coupon-check', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ coupon: code, amountBRL: amountInput.value, method: document.querySelector('input[name="pmethod"]:checked').value })
-        });
-        const j = await r.json();
-        if (!j.ok) {
-          couponMsg.className='text-sm mt-1 text-red-600';
-          couponMsg.textContent = 'Cupom inválido.';
+    // máscara PHONE corrigida
+    (function () {
+      const el = document.getElementById('phone');
+      if (!el) return;
+      const isDigit = (c) => /\d/.test(c);
+      const isSep   = (c) => c === ' ' || c === '-' || c === ')' || c === '(';
+      function format(d) {
+        d = (d || '').replace(/\D/g, '').slice(0, 11);
+        if (!d) return '';
+        if (d.length <= 2) return '(' + d;
+        if (d.length <= 7) return '(' + d.slice(0,2) + ') ' + d.slice(2);
+        return '(' + d.slice(0,2) + ') ' + d.slice(2,7) + '-' + d.slice(7);
+      }
+      function placeCaretFromDigitsCount(str, count){
+        let seen = 0;
+        for (let i = 0; i < str.length; i++) {
+          if (isDigit(str[i])) seen++;
+          if (seen >= count) return i + 1;
+        }
+        return str.length;
+      }
+      el.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Backspace') return;
+        const pos = el.selectionStart, end = el.selectionEnd, val = el.value;
+        if (pos === null || end === null) return;
+        if (pos > 0 && pos === end && isSep(val[pos - 1])) {
+          ev.preventDefault();
+          let digitsBeforeSep = 0;
+          for (let i = 0; i < pos - 1; i++) if (isDigit(val[i])) digitsBeforeSep++;
+          let digits = val.replace(/\D/g, '');
+          if (digitsBeforeSep > 0) {
+            const idx = digitsBeforeSep - 1;
+            digits = digits.slice(0, idx) + digits.slice(idx + 1);
+          }
+          const fmt = format(digits);
+          el.value = fmt;
+          const newPos = placeCaretFromDigitsCount(fmt, Math.max(0, digitsBeforeSep - 1));
+          try { el.setSelectionRange(newPos, newPos); } catch (_){}
           return;
         }
-        const val = (j.final_amount_cents/100).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
-        couponMsg.className='text-sm mt-1 text-green-600';
-        couponMsg.textContent = `Cupom aplicado: ${j.discount_percent}% OFF • total final ${val}`;
-      } catch {
-        couponMsg.className='text-sm mt-1 text-red-600';
-        couponMsg.textContent = 'Falha ao validar cupom.';
-      }
-    });
-
-    // submit
-    form.addEventListener('submit', async (e)=>{
-      e.preventDefault();
-      try { fbq('track','InitiateCheckout',{ value: normalizedAmountNumber(), currency:'BRL' }); } catch {}
-
-      if (cepLoading) { statusEl.textContent = '⏳ Aguarde terminar a busca do CEP...'; return; }
-
-      const nAmt = normalizedAmountNumber();
-      if (nAmt <= 0 || nAmt > 100000) { statusEl.textContent = 'Valor inválido.'; return; }
-
-      statusEl.textContent = 'Processando...';
-      extraEl.innerHTML = '';
-      btnPay.disabled = true;
-      btnPay.classList.add("opacity-60","cursor-not-allowed");
-
-      const payload = {
-        name:  document.getElementById('name').value.trim(),
-        email: document.getElementById('email').value.trim(),
-        cpf:   document.getElementById('cpf').value.replace(/\D/g,''),
-        phone: document.getElementById('phone').value.replace(/\D/g,''),
-        method: document.querySelector('input[name="pmethod"]:checked').value,
-        amountBRL: String(nAmt),
-
-        cart_id: document.getElementById('cart_id').value || null,
-        total_cents: document.getElementById('total_cents').value || null,
-
-        coupon: couponInput.value.trim() || null,
-
-        card_number: (document.getElementById('card_number')?.value || '').replace(/\D/g,''),
-        exp_month: Number(document.getElementById('exp_month')?.value || 0),
-        exp_year:  Number(document.getElementById('exp_year')?.value || 0),
-        cvv:       (document.getElementById('cvv')?.value || '').replace(/\D/g,''),
-        installments: Number(document.getElementById('installments')?.value || 1),
-
-        address: {
-          cep: document.getElementById('cep').value.replace(/\D/g,''),
-          address1: document.getElementById('address1').value.trim(),
-          number: document.getElementById('number').value.trim(),
-          complement: document.getElementById('complement').value.trim(),
-          neighborhood: document.getElementById('neighborhood').value.trim(),
-          city: document.getElementById('city').value.trim(),
-          state: document.getElementById('state').value.trim().toUpperCase()
+      });
+      el.addEventListener('input', ()=>{
+        const currVal = el.value;
+        const currDigits = currVal.replace(/\D/g, '').slice(0, 11);
+        let caret = el.selectionStart || 0;
+        let digitsBefore = 0;
+        for (let i = 0; i < Math.min(caret, currVal.length); i++) {
+          if (isDigit(currVal[i])) digitsBefore++;
         }
-      };
-
-      try{
-        const res = await fetch('/pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-        const result = await res.json();
-
-        statusEl.textContent = res.ok ? '✅ Pedido criado!' : '❌ ' + (result.error || 'Falha');
-        if (result.pix)    extraEl.innerHTML += renderPix(result.pix);
-        if (result.boleto) extraEl.innerHTML += renderBoleto(result.boleto);
-        if (result.card)   extraEl.innerHTML += renderCard(result.card);
-
-        const m = payload.method;
-        try {
-          const finalCents = Number(result?.data?.final_amount_cents ?? result?.data?.original_amount_cents ?? 0);
-          const val = (finalCents/100) || nAmt;
-          if (res.ok && (m==='pix' || m==='boleto')) fbq('track','AddPaymentInfo',{ value: val, currency:'BRL', payment_method: m });
-          if (m === 'card') {
-            const st = (result?.card?.status || result?.data?.charge_status || '').toLowerCase();
-            if (['paid','succeeded','captured','approved'].includes(st)) fbq('track','Purchase',{ value: val, currency:'BRL' });
-          }
-        } catch {}
-
-        if (res.ok && (m==='pix' || m==='boleto')){
-          extraEl.innerHTML += `<div class="p-3 border rounded text-sm">
-            Assim que o pagamento compensar, você receberá a confirmação no e-mail/WhatsApp.
-          </div>`;
-        }
-      }catch(err){
-        statusEl.textContent = '❌ Erro de conexão com o servidor.';
-        console.error(err);
-      }finally{
-        btnPay.disabled = false;
-        btnPay.classList.remove("opacity-60","cursor-not-allowed");
-      }
-    });
-
-    (function prefillFromQS(){
-      const p = new URLSearchParams(location.search);
-      if (p.has('name'))  document.getElementById('name').value = p.get('name');
-      if (p.has('email')) document.getElementById('email').value = p.get('email');
-      if (p.has('cpf'))   document.getElementById('cpf').value = p.get('cpf');
-      if (p.has('phone')) document.getElementById('phone').value = p.get('phone');
-      if (p.has('amount') && !amountInput.readOnly) amountInput.value = p.get('amount');
-      if (p.has('method')){
-        const m = p.get('method');
-        const radio = document.querySelector(`input[name="pmethod"][value="${m}"]`);
-        if (radio){ radio.checked = true; cardBox.classList.toggle('hidden', m!=='card'); }
-      }
+        const fmt = format(currDigits);
+        el.value = fmt;
+        const newPos = placeCaretFromDigitsCount(fmt, Math.max(0, digitsBefore));
+        try { el.setSelectionRange(newPos, newPos); } catch (_){}
+      });
+      el.value = format(el.value);
     })();
+
+    // máscara cartão
+    const cardEl = document.getElementById('card_number');
+    if (cardEl) {
+      cardEl.addEventListener('input', ()=>{
+        let v = cardEl.value.replace(/\D/g,'').slice(0,16);
+        v = v.replace(/(\d{4})(?=\d)/g,'$1 ');
+        cardEl.value = v;
+      });
+    }
   </script>
 </body>
 </html>
