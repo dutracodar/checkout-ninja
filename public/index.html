@@ -38,35 +38,29 @@
   <main class="mx-auto max-w-6xl px-4 py-6">
     <div class="grid grid-cols-1 md:grid-cols-[1fr_380px] gap-6 items-start">
       <!-- FORM (esquerda) -->
-      <form class="space-y-4 bg-white p-5 rounded shadow-md">
-        <input type="text" name="name" placeholder="Nome completo" class="w-full px-3 py-2 border rounded">
-        <input type="email" name="email" placeholder="E-mail" class="w-full px-3 py-2 border rounded">
-        <input type="text" name="cpf" placeholder="CPF (somente números)" class="w-full px-3 py-2 border rounded">
+      <form id="checkout-form" class="space-y-4 bg-white p-5 rounded shadow-md">
+        <input type="text" name="name" placeholder="Nome completo" class="w-full px-3 py-2 border rounded" required>
+        <input type="email" name="email" placeholder="E-mail" class="w-full px-3 py-2 border rounded" required>
+        <input type="text" name="cpf" placeholder="CPF (somente números)" class="w-full px-3 py-2 border rounded" required>
 
-        <!-- Campo de celular atualizado -->
-       <form id="checkout-form" class="space-y-4">
-  
-  <!-- Campo de celular atualizado -->
-  <input id="phone" 
-         name="phone" 
-         type="tel" 
-         inputmode="numeric" 
-         autocomplete="tel" 
-         maxlength="15"
-         placeholder="(11) 91234-5678"
-         class="w-full px-3 py-2 border rounded"
-         required />
+        <!-- Celular -->
+        <input id="phone"
+               name="phone"
+               type="tel"
+               inputmode="numeric"
+               autocomplete="tel"
+               maxlength="15"
+               placeholder="(11) 91234-5678"
+               class="w-full px-3 py-2 border rounded"
+               required />
 
-  <input type="text" name="value" placeholder="Valor (R$)" class="w-full px-3 py-2 border rounded">
-  <input type="text" name="coupon" placeholder="Cupom de desconto (%)" class="w-full px-3 py-2 border rounded">
+        <input type="text" name="value" placeholder="Valor (R$)" class="w-full px-3 py-2 border rounded">
+        <input type="text" name="coupon" placeholder="Cupom de desconto (%)" class="w-full px-3 py-2 border rounded">
 
-  <!-- botão de enviar -->
-  <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded">
-    Pagar
-  </button>
-
-</form>
-
+        <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded">
+          Pagar
+        </button>
+      </form>
 
       <!-- RESUMO (direita) -->
       <aside class="md:sticky md:top-4">
@@ -92,7 +86,7 @@
   <!-- Scripts -->
   <script>
     // =====================================================
-    // Resumo lateral (itens) — bloco único atualizado
+    // Resumo lateral (itens)
     // =====================================================
     function brlFmt(cents){
       return (Number(cents||0)/100).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
@@ -174,56 +168,43 @@
       };
     })();
 
-    // expõe global p/ Console
     window.renderOrderSummary = renderOrderSummary;
-
-    // chama uma vez ao carregar
     renderOrderSummary();
   </script>
 
-  <!-- Máscara de celular -->
+  <!-- Máscara de celular (única) -->
   <script>
-    (function () {
-      const el = document.getElementById('phone');
-      if (!el) return;
+  (function () {
+    const el = document.getElementById('phone');
+    if (!el) return;
 
-      el.addEventListener('input', function (e) {
-        const d = e.target.value.replace(/\D/g, '').slice(0, 11); // só dígitos
-        let v = '';
+    function format(raw) {
+      // (DD) 99999-9999 progressivo
+      const d = (raw || '').replace(/\D/g, '').slice(0, 11);
+      let out = '';
+      if (d.length > 0) out = '(' + d.slice(0, 2);
+      if (d.length >= 3) out += ') ' + d.slice(2, Math.min(7, d.length));
+      if (d.length >= 8) out += '-' + d.slice(7);
+      return out;
+    }
 
-        if (d.length <= 2) {
-          v = d; // só DDD
-        } else if (d.length <= 7) {
-          v = d.slice(0, 2) + ' ' + d.slice(2); // DDD + início do número
-        } else {
-          v = d.slice(0, 2) + ' ' + d.slice(2, 7) + '-' + d.slice(7); // completo
-        }
+    el.addEventListener('input', function (e) {
+      const start = e.target.selectionStart;
+      const prev  = e.target.value;
+      const raw   = prev.replace(/\D/g, '');
+      const next  = format(raw);
+      e.target.value = next;
 
-        e.target.value = v;
-      });
-    })();
+      let pos = start;
+      if (next[start - 1] === ')' && prev[start - 2] !== ')') pos++;
+      if (next[start - 1] === '-' && prev[start - 2] !== '-') pos++;
+      pos = Math.max(0, Math.min(next.length, pos));
+      try { e.target.setSelectionRange(pos, pos); } catch (_) {}
+    });
+
+    // pré-formatar se vier valor
+    el.value = format(el.value);
+  })();
   </script>
-  <script>
-const phoneInput = document.getElementById("phone");
-
-phoneInput.addEventListener("input", (e) => {
-  let v = e.target.value.replace(/\D/g, ""); // só números
-
-  if (v.length > 11) v = v.slice(0, 11); // trava no 11º dígito
-
-  if (v.length <= 2) {
-    v = `(${v}`;
-  } else if (v.length <= 6) {
-    v = `(${v.slice(0,2)}) ${v.slice(2)}`;
-  } else if (v.length <= 10) {
-    v = `(${v.slice(0,2)}) ${v.slice(2,7)}-${v.slice(7)}`;
-  } else {
-    v = `(${v.slice(0,2)}) ${v.slice(2,7)}-${v.slice(7,11)}`;
-  }
-
-  e.target.value = v;
-});
-</script>
-
 </body>
 </html>
