@@ -253,5 +253,88 @@
     el.value = format(el.value);
   })();
   </script>
+
+  <script>
+// Envia o checkout como JSON (evita "Bad Request")
+(function () {
+  const form = document.getElementById('checkout-form');
+  if (!form) return;
+
+  function onlyDigits(s){ return String(s||'').replace(/\D/g,''); }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const btn = form.querySelector('button[type="submit"]');
+    if (btn) { btn.disabled = true; btn.textContent = 'Processando...'; }
+
+    // Query params úteis (itens, total, tracking)
+    const qs = new URLSearchParams(location.search);
+
+    // Monta o payload que o backend espera
+    const payload = {
+      name:   form.name.value.trim(),
+      email:  form.email.value.trim(),
+      cpf:    onlyDigits(form.cpf.value),
+      phone:  onlyDigits(document.getElementById('phone').value),
+      // centavos vindos do front
+      value_cents: Number(
+        document.getElementById('value_cents')?.value
+        || document.getElementById('total_cents')?.value
+        || 0
+      ),
+      total_cents: Number(document.getElementById('total_cents')?.value || 0),
+
+      // dados do carrinho/utm da URL (se existirem)
+      items_b64: qs.get('items_b64') || null,
+      cart_id:   qs.get('cart_id')   || null,
+      coupon:    form.coupon?.value  || null,
+
+      // passthrough UTM (se quiser aproveitar no backend)
+      utm_source:   qs.get('utm_source')   || null,
+      utm_medium:   qs.get('utm_medium')   || null,
+      utm_campaign: qs.get('utm_campaign') || null,
+      fbclid:       qs.get('fbclid')       || null,
+      gclid:        qs.get('gclid')        || null
+    };
+
+    try {
+      const res = await fetch('/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      // Se o backend responder erro, mostra e destrava botão
+      if (!res.ok) {
+        const txt = await res.text();
+        alert('Erro no checkout: ' + (txt || res.status));
+        if (btn) { btn.disabled = false; btn.textContent = 'Pagar'; }
+        return;
+      }
+
+      // Fluxos possíveis: redirect_url, html ou dados do pedido
+      const data = await res.json().catch(() => ({}));
+
+      if (data.redirect_url) {
+        location.href = data.redirect_url;               // ex.: página Pix/Boleto/Cartão
+      } else if (data.html) {
+        document.open(); document.write(data.html); document.close();
+      } else if (data.order_id) {
+        location.href = '/payment?order_id=' + data.order_id;
+      } else {
+        // fallback: recarrega para não ficar parado
+        location.reload();
+      }
+
+    } catch (err) {
+      console.error(err);
+      alert('Falha de rede no checkout.');
+      if (btn) { btn.disabled = false; btn.textContent = 'Pagar'; }
+    }
+  });
+})();
+</script>
+
 </body>
 </html>
